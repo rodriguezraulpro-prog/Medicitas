@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Compatibility shim for browser extensions trying to assign window.fetch when it has only a getter
+      try {
+        const originalFetch = window.fetch;
+        let _customFetch = originalFetch;
+        Object.defineProperty(window, 'fetch', {
+          configurable: true,
+          enumerable: true,
+          get() {
+            return _customFetch;
+          },
+          set(val) {
+            _customFetch = val;
+          }
+        });
+      } catch (e) {
+        // Safe fallback
+      }
+    </script>
+    <title>Panel Administrativo - MediCitas</title>
+    <meta name="description" content="Panel de administración de la clínica para gestión de citas WhatsApp, médicos, horarios y reportes en tiempo real." />
+    <meta property="og:title" content="Panel Administrativo - MediCitas" />
+    <meta property="og:description" content="Panel de administración de la clínica para gestión de citas WhatsApp, médicos, horarios y reportes en tiempo real." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10'/><path d='m9 12 2 2 4-4'/></svg>" />
+  </head>
+  <body class="bg-slate-50 text-slate-800 antialiased selection:bg-blue-600 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/admin-main.tsx"></script>
+    <script>
+      // Carga automatica del bundle precompilado cuando se sube el ZIP directo a Cloudflare Pages (Carga directa) o GitHub Pages
+      (function () {
+        var isViteDev = !!document.querySelector('script[src*="@vite/client"]');
+        var isBuilt = !!document.querySelector('script[src*="assets/admin.js"]');
+        if (!isViteDev && !isBuilt) {
+          var css = document.createElement('link');
+          css.rel = 'stylesheet';
+          css.href = './public/bundle/src.css';
+          document.head.appendChild(css);
+
+          var js = document.createElement('script');
+          js.type = 'module';
+          js.src = './public/bundle/admin.js';
+          document.body.appendChild(js);
+        }
+      })();
+    </script>
+  </body>
+</html>

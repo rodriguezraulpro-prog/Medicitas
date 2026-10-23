@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Compatibility shim for browser extensions trying to assign window.fetch when it has only a getter
+      try {
+        const originalFetch = window.fetch;
+        let _customFetch = originalFetch;
+        Object.defineProperty(window, 'fetch', {
+          configurable: true,
+          enumerable: true,
+          get() {
+            return _customFetch;
+          },
+          set(val) {
+            _customFetch = val;
+          }
+        });
+      } catch (e) {
+        // Safe fallback
+      }
+    </script>
+    <title>MediCitas - Gestión y Reserva Médica por WhatsApp</title>
+    <meta name="description" content="Plataforma móvil para consultorios médicos con reserva de citas directa a WhatsApp sin registro, gestión de médicos, especialidades, horarios y reportes en tiempo real." />
+    <meta property="og:title" content="MediCitas - Gestión y Reserva Médica por WhatsApp" />
+    <meta property="og:description" content="Plataforma móvil para consultorios médicos con reserva de citas directa a WhatsApp sin registro, gestión de médicos, especialidades, horarios y reportes en tiempo real." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // Carga automatica del bundle precompilado cuando se sube el ZIP directo a Cloudflare Pages (Carga directa) o GitHub Pages
+      (function () {
+        var isViteDev = !!document.querySelector('script[src*="@vite/client"]');
+        var isBuilt = !!document.querySelector('script[src*="assets/main.js"]');
+        if (!isViteDev && !isBuilt) {
+          var css = document.createElement('link');
+          css.rel = 'stylesheet';
+          css.href = './public/bundle/src.css';
+          document.head.appendChild(css);
+
+          var js = document.createElement('script');
+          js.type = 'module';
+          js.src = './public/bundle/main.js';
+          document.body.appendChild(js);
+        }
+      })();
+    </script>
+  </body>
+</html>
+

@@ -1,0 +1,8 @@
+{
+  "name": "MediCitas - Gestión y Reserva Médica por WhatsApp",
+  "description": "Plataforma móvil para consultorios médicos con reserva de citas directa a WhatsApp sin registro, gestión de médicos, especialidades, horarios y reportes en tiempo real.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
