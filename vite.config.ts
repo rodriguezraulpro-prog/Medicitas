@@ -18,9 +18,7 @@ export default defineConfig(() => {
             const destDir = path.resolve(__dirname, 'public/bundle');
             if (fs.existsSync(srcDir)) {
               fs.mkdirSync(destDir, {recursive: true});
-              for (const file of fs.readdirSync(srcDir)) {
-                fs.copyFileSync(path.join(srcDir, file), path.join(destDir, file));
-              }
+              fs.cpSync(srcDir, destDir, {recursive: true});
             }
           } catch (err) {
             console.warn('Could not sync public/bundle:', err);

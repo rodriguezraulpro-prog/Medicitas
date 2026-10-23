@@ -1,2 +1,4 @@
-/admin /admin.html 200
-/admin/ /admin.html 200
+# Cloudflare Pages SPA Routing
+# Cloudflare Pages automatically serves admin.html at /admin without redirect loops.
+# All other non-file paths are routed to index.html for Single Page Application navigation.
+/*    /index.html   200

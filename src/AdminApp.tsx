@@ -401,7 +401,7 @@ export const AdminApp: React.FC = () => {
                     <span>Enlace directo para el personal:</span>
                   </div>
                   <p className="text-[11px] font-mono text-blue-700 break-all select-all bg-white p-2.5 rounded-xl border border-blue-200 font-semibold">
-                    {`${window.location.origin}${window.location.pathname.replace(/\/(index\.html|admin\.html)?$/, '')}/admin.html`}
+                    {`${window.location.origin}${window.location.pathname.replace(/\/(index\.html|admin\.html|\/admin)?$/, '')}/admin`}
                   </p>
                   <p className="text-[11px] text-slate-500">
                     Puedes guardar este enlace en los marcadores del navegador o teléfono de la clínica.

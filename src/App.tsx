@@ -28,15 +28,23 @@ function AppContent() {
     );
   });
 
-  const handleAdminTrigger = () => {
-    window.location.href = './admin.html';
+  const handleOpenAdmin = (e?: React.MouseEvent) => {
+    if (e) e.preventDefault();
+    setIsAdminPath(true);
+    if (!window.location.pathname.endsWith('/admin') && window.location.hash !== '#admin') {
+      try {
+        window.history.pushState({ admin: true }, '', '/admin');
+      } catch {
+        window.location.hash = '#admin';
+      }
+    }
   };
 
   const handleTouchEnd = () => {
     const now = Date.now();
     // Double tap within 350ms
     if (now - lastTouchTime < 350) {
-      handleAdminTrigger();
+      handleOpenAdmin();
     }
     setLastTouchTime(now);
   };
@@ -133,9 +141,10 @@ function AppContent() {
 
             {/* Clinic Staff link */}
             <a
-              href="./admin.html"
+              href="/admin"
+              onClick={handleOpenAdmin}
               id="admin-footer-link"
-              className="text-[11px] text-blue-600 hover:text-blue-800 font-semibold tracking-tight transition-colors py-1 px-2 rounded-lg hover:bg-blue-50/80"
+              className="text-[11px] text-blue-600 hover:text-blue-800 font-semibold tracking-tight transition-colors py-1 px-2 rounded-lg hover:bg-blue-50/80 cursor-pointer"
               title="Acceso administrativo"
             >
               Acceso personal de clínica
