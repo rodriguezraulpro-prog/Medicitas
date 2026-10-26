@@ -288,8 +288,8 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({ onClos
   );
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
-      <div className="bg-white max-w-2xl sm:max-w-3xl w-full rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in-95">
+    <div className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-slate-900/70 backdrop-blur-xs flex items-start sm:items-center justify-center p-2 sm:p-4">
+      <div className="bg-white max-w-2xl sm:max-w-3xl w-full my-auto rounded-2xl sm:rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92dvh] sm:max-h-[90vh] animate-in fade-in zoom-in-95">
         
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-700 via-blue-800 to-indigo-900 text-white p-4 sm:p-5 flex items-center justify-between shrink-0">
