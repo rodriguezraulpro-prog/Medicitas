@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useClinic } from '../../context/ClinicContext';
+import { encodeCloudConfigToken } from '../../services/supabase';
 import {
   Database,
   Cloud,
@@ -26,6 +27,8 @@ import {
   Unlock,
   Code2,
   CloudOff,
+  Smartphone,
+  Share2,
 } from 'lucide-react';
 import { SUPABASE_SQL_SCHEMA } from '../../data/supabaseSqlScript';
 
@@ -64,9 +67,19 @@ export const SupabaseManager: React.FC<SupabaseManagerProps> = ({
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
+  const [copiedSyncLink, setCopiedSyncLink] = useState<'public' | 'admin' | null>(null);
   const [showSqlPreview, setShowSqlPreview] = useState(false);
   const [showDisconnectModal, setShowDisconnectModal] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
+
+  useEffect(() => {
+    if (supabaseConfig.url && !urlInput) {
+      setUrlInput(supabaseConfig.url);
+    }
+    if (supabaseConfig.anonKey && !anonKeyInput) {
+      setAnonKeyInput(supabaseConfig.anonKey);
+    }
+  }, [supabaseConfig.url, supabaseConfig.anonKey]);
 
   const handleSaveAndConnect = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -531,6 +544,75 @@ export const SupabaseManager: React.FC<SupabaseManagerProps> = ({
               <li>Pega el script base (botón abajo) y dale a <strong>Run</strong>.</li>
               <li>Copia la <strong>URL</strong> y el <strong>Anon Key</strong> en este formulario o en las variables de entorno de su dominio.</li>
             </ol>
+          </div>
+
+          {/* Multi-Device Sync & Cloudflare Helper Card */}
+          <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-xs space-y-3">
+            <h4 className="font-extrabold text-sm text-slate-900 flex items-center gap-2">
+              <Smartphone className="w-4 h-4 text-teal-600" />
+              <span>Sincronizar PCs y Celulares</span>
+            </h4>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Si publicas en <strong>Cloudflare Pages</strong>, guarda la conexión aquí antes de descargar el ZIP (o usa estos enlaces directos para vincular cualquier otro teléfono o PC en 1 clic):
+            </p>
+
+            {isCloudConnected && supabaseConfig.url && supabaseConfig.anonKey ? (
+              <div className="space-y-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const token = encodeCloudConfigToken(supabaseConfig);
+                    const origin = window.location.origin;
+                    const syncUrl = `${origin}/?cloud=${encodeURIComponent(token)}`;
+                    navigator.clipboard.writeText(syncUrl);
+                    setCopiedSyncLink('public');
+                    setTimeout(() => setCopiedSyncLink(null), 3000);
+                  }}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 text-xs font-bold flex items-center justify-between gap-2 transition cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 truncate">
+                    <Share2 className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                    <span className="truncate">
+                      {copiedSyncLink === 'public' ? '¡Enlace Pacientes Copiado!' : 'Copiar Enlace Pacientes (Móvil/PC)'}
+                    </span>
+                  </span>
+                  {copiedSyncLink === 'public' ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const token = encodeCloudConfigToken(supabaseConfig);
+                    const origin = window.location.origin;
+                    const syncUrl = `${origin}/admin?cloud=${encodeURIComponent(token)}`;
+                    navigator.clipboard.writeText(syncUrl);
+                    setCopiedSyncLink('admin');
+                    setTimeout(() => setCopiedSyncLink(null), 3000);
+                  }}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs font-bold flex items-center justify-between gap-2 transition cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 truncate">
+                    <Key className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+                    <span className="truncate">
+                      {copiedSyncLink === 'admin' ? '¡Enlace Admin Copiado!' : 'Copiar Enlace Admin Sincronizado'}
+                    </span>
+                  </span>
+                  {copiedSyncLink === 'admin' ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                  )}
+                </button>
+              </div>
+            ) : (
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500">
+                Conecta primero tu URL y Anon Key para habilitar los enlaces de sincronización directa o exportar el proyecto preconfigurado.
+              </div>
+            )}
           </div>
         </div>
       </div>

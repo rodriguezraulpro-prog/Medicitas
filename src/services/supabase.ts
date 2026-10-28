@@ -9,6 +9,9 @@ export interface SupabaseConfig {
 
 const SUPABASE_STORAGE_KEY = 'medicitas_cloud_config_v3';
 
+let memoryStoredConfig: SupabaseConfig | null = null;
+let activeClient: SupabaseClient | null = null;
+
 // Purge legacy stored credentials so the template starts completely blank
 try {
   localStorage.removeItem('medicitas_supabase_config');
@@ -17,21 +20,114 @@ try {
   // Ignore error
 }
 
-// 1. Get configuration from custom local configuration (blank by default for clean template)
+function isValidConfig(url?: string, anonKey?: string): boolean {
+  if (!url || !anonKey) return false;
+  const cleanUrl = String(url).trim();
+  const cleanKey = String(anonKey).trim();
+  if (!cleanUrl || !cleanKey) return false;
+  if (cleanUrl.includes('your-project-id') || cleanKey === 'your-anon-public-key') return false;
+  return cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://');
+}
+
+// Encode credentials into a shareable URL parameter for 1-click cross-device setup
+export function encodeCloudConfigToken(config: SupabaseConfig): string {
+  try {
+    if (!isValidConfig(config.url, config.anonKey)) return '';
+    const json = JSON.stringify({ u: config.url.trim(), k: config.anonKey.trim() });
+    return btoa(encodeURIComponent(json));
+  } catch {
+    return '';
+  }
+}
+
+// Decode credentials from URL query parameter (?cloud=... or ?cloud_url=...&cloud_key=...)
+export function checkUrlForCloudConfig(): SupabaseConfig | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('cloud');
+    let resolvedUrl = params.get('cloud_url') || '';
+    let resolvedKey = params.get('cloud_key') || '';
+
+    if (token) {
+      try {
+        const decodedJson = decodeURIComponent(atob(token));
+        const parsed = JSON.parse(decodedJson);
+        if (parsed && parsed.u && parsed.k) {
+          resolvedUrl = String(parsed.u).trim();
+          resolvedKey = String(parsed.k).trim();
+        }
+      } catch {
+        // Ignore malformed token
+      }
+    }
+
+    if (isValidConfig(resolvedUrl, resolvedKey)) {
+      const config = { url: resolvedUrl.trim(), anonKey: resolvedKey.trim() };
+      saveStoredSupabaseConfig(config);
+
+      // Clean URL parameters without reloading the page
+      params.delete('cloud');
+      params.delete('cloud_url');
+      params.delete('cloud_key');
+      const newSearch = params.toString();
+      const newUrl = `${window.location.pathname}${newSearch ? `?${newSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState({}, document.title, newUrl);
+
+      return config;
+    }
+  } catch {
+    // Ignore error
+  }
+  return null;
+}
+
+function getEnvSupabaseConfig(): SupabaseConfig | null {
+  try {
+    const envUrl = import.meta.env?.VITE_SUPABASE_URL || '';
+    const envKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || '';
+    if (isValidConfig(envUrl, envKey)) {
+      return {
+        url: String(envUrl).trim(),
+        anonKey: String(envKey).trim(),
+      };
+    }
+  } catch {
+    // Ignore error
+  }
+  return null;
+}
+
+// 1. Get configuration from URL params, localStorage, memory, or Vite env vars
 export function getStoredSupabaseConfig(): SupabaseConfig {
+  const urlCfg = checkUrlForCloudConfig();
+  if (urlCfg) return urlCfg;
+
   try {
     const saved = localStorage.getItem(SUPABASE_STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (parsed.url && parsed.anonKey) {
-        return {
+      if (isValidConfig(parsed?.url, parsed?.anonKey)) {
+        const cfg = {
           url: String(parsed.url).trim(),
           anonKey: String(parsed.anonKey).trim(),
         };
+        memoryStoredConfig = cfg;
+        return cfg;
       }
     }
   } catch {
-    // Ignore error
+    // Ignore localStorage read error
+  }
+
+  if (memoryStoredConfig && isValidConfig(memoryStoredConfig.url, memoryStoredConfig.anonKey)) {
+    return memoryStoredConfig;
+  }
+
+  const envCfg = getEnvSupabaseConfig();
+  if (envCfg) {
+    memoryStoredConfig = envCfg;
+    return envCfg;
   }
 
   return {
@@ -41,78 +137,134 @@ export function getStoredSupabaseConfig(): SupabaseConfig {
 }
 
 export function saveStoredSupabaseConfig(config: SupabaseConfig): void {
-  try {
-    if (!config.url || !config.anonKey) {
-      localStorage.removeItem(SUPABASE_STORAGE_KEY);
-    } else {
-      localStorage.setItem(
-        SUPABASE_STORAGE_KEY,
-        JSON.stringify({ url: config.url.trim(), anonKey: config.anonKey.trim() })
-      );
-    }
-    // Re-initialize client
+  const cleanUrl = config?.url ? config.url.trim() : '';
+  const cleanKey = config?.anonKey ? config.anonKey.trim() : '';
+
+  if (!cleanUrl || !cleanKey) {
+    memoryStoredConfig = null;
     activeClient = null;
+    try {
+      localStorage.removeItem(SUPABASE_STORAGE_KEY);
+    } catch {
+      // Ignore error
+    }
+    return;
+  }
+
+  const normalized = { url: cleanUrl, anonKey: cleanKey };
+  memoryStoredConfig = normalized;
+  activeClient = null;
+
+  try {
+    localStorage.setItem(SUPABASE_STORAGE_KEY, JSON.stringify(normalized));
   } catch (err) {
-    console.error('Failed to save Supabase config to localStorage', err);
+    console.warn('Failed to save Supabase config to localStorage', err);
   }
 }
 
-// Fetch configuration from the backend server (allows all devices/phones to sync)
+// Fetch configuration from URL, backend/Cloudflare Worker API, static cloud-config.json, or Vite env
 export async function fetchServerSupabaseConfig(): Promise<SupabaseConfig | null> {
-  try {
-    const res = await fetch('./api/config/supabase');
-    const contentType = res.headers.get('content-type') || '';
-    if (!res.ok || !contentType.includes('application/json')) return null;
-    const data = await res.json();
-    if (data.url && data.anonKey) {
-      saveStoredSupabaseConfig({ url: data.url, anonKey: data.anonKey });
-      return { url: data.url, anonKey: data.anonKey };
-    }
-  } catch {
-    // Graceful silent fallback for static hosts (Cloudflare Pages / GitHub Pages)
+  // 1. Check URL query parameter (?cloud=...) first
+  const urlCfg = checkUrlForCloudConfig();
+  if (urlCfg) {
+    // Best-effort push to server/worker cache so other devices on the same edge also get it
+    saveServerSupabaseConfig(urlCfg).catch(() => {});
+    return urlCfg;
   }
+
+  // 2. Check /api/config/supabase (Express server in dev/node or _worker.js on Cloudflare Pages)
+  const apiCandidates = [`./api/config/supabase?t=${Date.now()}`, `/api/config/supabase?t=${Date.now()}`];
+  for (const endpoint of apiCandidates) {
+    try {
+      const res = await fetch(endpoint, { cache: 'no-store' });
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json();
+        if (isValidConfig(data?.url, data?.anonKey)) {
+          const cfg = { url: String(data.url).trim(), anonKey: String(data.anonKey).trim() };
+          saveStoredSupabaseConfig(cfg);
+          return cfg;
+        }
+      }
+    } catch {
+      // Continue to next candidate
+    }
+  }
+
+  // 3. Check static cloud-config.json (works on Cloudflare Pages Direct Upload, GitHub Pages, etc.)
+  const staticCandidates = [
+    `./cloud-config.json?t=${Date.now()}`,
+    `./public/cloud-config.json?t=${Date.now()}`,
+    `/cloud-config.json?t=${Date.now()}`,
+  ];
+  for (const staticPath of staticCandidates) {
+    try {
+      const res = await fetch(staticPath, { cache: 'no-store' });
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json();
+        if (isValidConfig(data?.url, data?.anonKey)) {
+          const cfg = { url: String(data.url).trim(), anonKey: String(data.anonKey).trim() };
+          saveStoredSupabaseConfig(cfg);
+          return cfg;
+        }
+      }
+    } catch {
+      // Continue to next candidate
+    }
+  }
+
+  // 4. Check build-time Vite environment variables
+  const envCfg = getEnvSupabaseConfig();
+  if (envCfg) {
+    saveStoredSupabaseConfig(envCfg);
+    return envCfg;
+  }
+
   return null;
 }
 
-// Save configuration both to localStorage and the backend server for all devices
-export async function saveServerSupabaseConfig(config: SupabaseConfig): Promise<{ success: boolean; message: string }> {
-  try {
-    saveStoredSupabaseConfig(config);
+// Save configuration both to localStorage and the backend/Cloudflare Worker server for all devices
+export async function saveServerSupabaseConfig(config: SupabaseConfig): Promise<{ success: boolean; message: string; persistedOnServer?: boolean }> {
+  saveStoredSupabaseConfig(config);
 
-    const res = await fetch('./api/config/supabase', {
-      method: config.url && config.anonKey ? 'POST' : 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: config.url && config.anonKey ? JSON.stringify(config) : undefined,
-    });
+  const endpoints = ['./api/config/supabase', '/api/config/supabase'];
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        method: config.url && config.anonKey ? 'POST' : 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: config.url && config.anonKey ? JSON.stringify(config) : undefined,
+      });
 
-    const contentType = res.headers.get('content-type') || '';
-    if (!res.ok || !contentType.includes('application/json')) {
-      return {
-        success: true,
-        message: 'Configuración de la Nube guardada exitosamente.',
-      };
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json();
+        return {
+          success: true,
+          persistedOnServer: true,
+          message: data.message || 'Configuración guardada para todos los dispositivos.',
+        };
+      }
+    } catch {
+      // Try next endpoint
     }
-
-    const data = await res.json();
-    return {
-      success: true,
-      message: data.message || 'Configuración guardada para todos los dispositivos.',
-    };
-  } catch {
-    return {
-      success: true,
-      message: 'Configuración de la Nube guardada exitosamente.',
-    };
   }
-}
 
-let activeClient: SupabaseClient | null = null;
+  return {
+    success: true,
+    persistedOnServer: false,
+    message: 'Configuración de la Nube guardada exitosamente.',
+  };
+}
 
 export function setSupabaseClientConfig(config: SupabaseConfig | null): void {
   activeClient = null;
-  if (config && config.url && config.anonKey) {
+  if (config && isValidConfig(config.url, config.anonKey)) {
+    const normalized = { url: config.url.trim(), anonKey: config.anonKey.trim() };
+    memoryStoredConfig = normalized;
     try {
-      activeClient = createClient(config.url, config.anonKey, {
+      activeClient = createClient(normalized.url, normalized.anonKey, {
         auth: { persistSession: false },
       });
     } catch (err) {
@@ -125,7 +277,7 @@ export function getSupabaseClient(): SupabaseClient | null {
   if (activeClient) return activeClient;
 
   const config = getStoredSupabaseConfig();
-  if (config.url && config.anonKey) {
+  if (isValidConfig(config.url, config.anonKey)) {
     try {
       activeClient = createClient(config.url, config.anonKey, {
         auth: {
@@ -142,19 +294,20 @@ export function getSupabaseClient(): SupabaseClient | null {
 }
 
 export function isSupabaseConfigured(): boolean {
+  if (activeClient) return true;
   const config = getStoredSupabaseConfig();
-  return Boolean(config.url && config.anonKey);
+  return isValidConfig(config.url, config.anonKey);
 }
 
 // Test connection
 export async function testSupabaseConnection(config?: SupabaseConfig): Promise<{ success: boolean; message: string }> {
   try {
     const targetConfig = config || getStoredSupabaseConfig();
-    if (!targetConfig.url || !targetConfig.anonKey) {
+    if (!isValidConfig(targetConfig.url, targetConfig.anonKey)) {
       return { success: false, message: 'La URL y el Anon Key de la Nube son requeridos.' };
     }
 
-    const testClient = createClient(targetConfig.url, targetConfig.anonKey, {
+    const testClient = createClient(targetConfig.url.trim(), targetConfig.anonKey.trim(), {
       auth: { persistSession: false },
     });
 
@@ -241,7 +394,7 @@ function mapDoctorToDb(doc: Doctor): any {
   return {
     id: doc.id,
     name: doc.name,
-    specialty_id: doc.specialtyId,
+    specialty_id: doc.specialtyId && doc.specialtyId.trim() !== '' ? doc.specialtyId : null,
     photo_url: doc.photoUrl || '',
     consultorio: doc.consultorio || '',
     fee: doc.fee,
@@ -303,9 +456,9 @@ function mapAppointmentFromDb(row: any): Appointment {
     type: row.type || 'presencial',
     date: row.date,
     time: row.time,
-    doctorId: row.doctor_id,
+    doctorId: row.doctor_id || '',
     doctorName: row.doctor_name,
-    specialtyId: row.specialty_id,
+    specialtyId: row.specialty_id || '',
     specialtyName: row.specialty_name || '',
     status: row.status || 'pendiente_whatsapp',
     createdAt: row.created_at || new Date().toISOString(),
@@ -329,9 +482,9 @@ export function mapAppointmentToDb(app: Appointment, includeCancellationCols = t
     type: app.type,
     date: app.date,
     time: app.time,
-    doctor_id: app.doctorId,
+    doctor_id: app.doctorId && app.doctorId.trim() !== '' ? app.doctorId : null,
     doctor_name: app.doctorName,
-    specialty_id: app.specialtyId,
+    specialty_id: app.specialtyId || '',
     specialty_name: app.specialtyName || '',
     status: app.status,
     created_at: app.createdAt,
@@ -392,6 +545,12 @@ export async function fetchClinicDataFromSupabase(): Promise<{
       client.from('blocked_slots').select('*'),
     ]);
 
+    // If core tables failed due to network or auth/table error, do not return empty arrays
+    if (specRes.error && docRes.error && appRes.error) {
+      console.warn('Supabase query error:', specRes.error);
+      return null;
+    }
+
     let config: ClinicConfig | undefined;
     if (cfgRes.data) {
       config = mapConfigFromDb(cfgRes.data);
@@ -420,19 +579,37 @@ export async function syncSaveConfigToSupabase(config: ClinicConfig): Promise<bo
   if (!client) return false;
   try {
     const { error } = await client.from('clinic_config').upsert(mapConfigToDb(config));
-    return !error;
+    if (error) {
+      console.warn('Error syncing config to Supabase:', error);
+      return false;
+    }
+    return true;
   } catch (err) {
     console.warn('Error syncing config to Supabase:', err);
     return false;
   }
 }
 
-export async function syncSaveDoctorToSupabase(doctor: Doctor): Promise<boolean> {
+export async function syncSaveDoctorToSupabase(doctor: Doctor, specialty?: Specialty): Promise<boolean> {
   const client = getSupabaseClient();
   if (!client) return false;
   try {
-    const { error } = await client.from('doctors').upsert(mapDoctorToDb(doctor));
-    return !error;
+    if (specialty) {
+      await client.from('specialties').upsert(mapSpecialtyToDb(specialty));
+    }
+    const payload = mapDoctorToDb(doctor);
+    const { error } = await client.from('doctors').upsert(payload);
+    if (error) {
+      if (error.code === '23503') {
+        // Foreign key violation if specialty_id does not exist in remote specialties table yet
+        const fallbackPayload = { ...payload, specialty_id: null };
+        const { error: retryErr } = await client.from('doctors').upsert(fallbackPayload);
+        return !retryErr;
+      }
+      console.warn('Error syncing doctor to Supabase:', error);
+      return false;
+    }
+    return true;
   } catch (err) {
     console.warn('Error syncing doctor to Supabase:', err);
     return false;
@@ -456,7 +633,11 @@ export async function syncSaveSpecialtyToSupabase(specialty: Specialty): Promise
   if (!client) return false;
   try {
     const { error } = await client.from('specialties').upsert(mapSpecialtyToDb(specialty));
-    return !error;
+    if (error) {
+      console.warn('Error syncing specialty to Supabase:', error);
+      return false;
+    }
+    return true;
   } catch (err) {
     console.warn('Error syncing specialty to Supabase:', err);
     return false;
@@ -479,16 +660,27 @@ export async function syncSaveAppointmentToSupabase(appointment: Appointment): P
   const client = getSupabaseClient();
   if (!client) return false;
   try {
-    const { error } = await client.from('appointments').upsert(mapAppointmentToDb(appointment, true));
+    const payload = mapAppointmentToDb(appointment, true);
+    const { error } = await client.from('appointments').upsert(payload);
     if (error) {
       if (error.code === '42703') {
         // If cancellation columns are not present in Supabase table yet, retry without them
-        const { error: retryError } = await client.from('appointments').upsert(mapAppointmentToDb(appointment, false));
-        if (retryError) {
-          console.warn('Error in fallback appointment upsert:', retryError);
-          return false;
+        const fallbackCols = mapAppointmentToDb(appointment, false);
+        const { error: retryError } = await client.from('appointments').upsert(fallbackCols);
+        if (retryError && retryError.code === '23503') {
+          const { error: retryNoDoc } = await client
+            .from('appointments')
+            .upsert({ ...fallbackCols, doctor_id: null });
+          return !retryNoDoc;
         }
-        return true;
+        return !retryError;
+      }
+      if (error.code === '23503') {
+        // Foreign key violation if doctor_id is not in remote doctors table yet
+        const { error: retryNoDoc } = await client
+          .from('appointments')
+          .upsert({ ...payload, doctor_id: null });
+        return !retryNoDoc;
       }
       console.warn('Error syncing appointment to Supabase:', error);
       return false;
@@ -508,6 +700,22 @@ export async function syncDeleteAppointmentFromSupabase(id: string): Promise<boo
     return !error;
   } catch (err) {
     console.warn('Error deleting appointment from Supabase:', err);
+    return false;
+  }
+}
+
+export async function syncClearAllDataFromSupabase(defaultConfig: ClinicConfig): Promise<boolean> {
+  const client = getSupabaseClient();
+  if (!client) return false;
+  try {
+    await client.from('appointments').delete().neq('id', '__none__');
+    await client.from('blocked_slots').delete().neq('id', '__none__');
+    await client.from('doctors').delete().neq('id', '__none__');
+    await client.from('specialties').delete().neq('id', '__none__');
+    await client.from('clinic_config').upsert(mapConfigToDb(defaultConfig));
+    return true;
+  } catch (err) {
+    console.warn('Error clearing all data from Supabase:', err);
     return false;
   }
 }

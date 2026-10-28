@@ -11,6 +11,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG_FILE_PATH = path.resolve(__dirname, 'cloud-config.json');
+const PUBLIC_CONFIG_FILE_PATH = path.resolve(__dirname, 'public', 'cloud-config.json');
+const DIST_CONFIG_FILE_PATH = path.resolve(__dirname, 'dist', 'cloud-config.json');
 const LEGACY_CONFIG_FILE_PATH = path.resolve(__dirname, 'supabase-config.json');
 
 // Remove legacy config file if it exists so template starts completely blank
@@ -29,19 +31,32 @@ interface SupabaseServerConfig {
 
 // Helper to read current Cloud server configuration
 function readSupabaseConfig(): SupabaseServerConfig {
-  try {
-    if (fs.existsSync(CONFIG_FILE_PATH)) {
-      const content = fs.readFileSync(CONFIG_FILE_PATH, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (parsed.url && parsed.anonKey) {
-        return {
-          url: String(parsed.url).trim(),
-          anonKey: String(parsed.anonKey).trim(),
-        };
+  const candidatePaths = [CONFIG_FILE_PATH, PUBLIC_CONFIG_FILE_PATH];
+  for (const filePath of candidatePaths) {
+    try {
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const parsed = JSON.parse(content);
+        if (parsed.url && parsed.anonKey) {
+          return {
+            url: String(parsed.url).trim(),
+            anonKey: String(parsed.anonKey).trim(),
+          };
+        }
       }
+    } catch (err) {
+      console.warn(`Could not read ${filePath}:`, err);
     }
-  } catch (err) {
-    console.warn('Could not read cloud-config.json:', err);
+  }
+
+  // Fallback to environment variables if configured
+  const envUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const envKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
+  if (envUrl && envKey && !envUrl.includes('your-project-id')) {
+    return {
+      url: envUrl.trim(),
+      anonKey: envKey.trim(),
+    };
   }
 
   // Start completely blank as a clean template
@@ -51,25 +66,39 @@ function readSupabaseConfig(): SupabaseServerConfig {
   };
 }
 
-// Helper to save Supabase server configuration
+// Helper to save Supabase server configuration to root, public, and dist so static exports also get it
 function saveSupabaseConfig(config: SupabaseServerConfig): boolean {
   try {
-    fs.writeFileSync(
-      CONFIG_FILE_PATH,
-      JSON.stringify(
-        {
-          url: config.url.trim(),
-          anonKey: config.anonKey.trim(),
-          updatedAt: new Date().toISOString(),
-        },
-        null,
-        2
-      ),
-      'utf-8'
+    const jsonPayload = JSON.stringify(
+      {
+        url: config.url.trim(),
+        anonKey: config.anonKey.trim(),
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2
     );
+
+    fs.writeFileSync(CONFIG_FILE_PATH, jsonPayload, 'utf-8');
+
+    try {
+      fs.mkdirSync(path.dirname(PUBLIC_CONFIG_FILE_PATH), { recursive: true });
+      fs.writeFileSync(PUBLIC_CONFIG_FILE_PATH, jsonPayload, 'utf-8');
+    } catch (e) {
+      console.warn('Could not write public/cloud-config.json:', e);
+    }
+
+    try {
+      if (fs.existsSync(path.dirname(DIST_CONFIG_FILE_PATH))) {
+        fs.writeFileSync(DIST_CONFIG_FILE_PATH, jsonPayload, 'utf-8');
+      }
+    } catch {
+      // ignore
+    }
+
     return true;
   } catch (err) {
-    console.error('Failed to write supabase-config.json:', err);
+    console.error('Failed to write cloud-config.json:', err);
     return false;
   }
 }
@@ -116,9 +145,7 @@ async function startServer() {
   // API Route: Clear Cloud configuration (revert to local)
   app.delete('/api/config/supabase', (_req, res) => {
     try {
-      if (fs.existsSync(CONFIG_FILE_PATH)) {
-        fs.unlinkSync(CONFIG_FILE_PATH);
-      }
+      saveSupabaseConfig({ url: '', anonKey: '' });
       res.json({ success: true, message: 'Configuración de la Nube eliminada del servidor.' });
     } catch (err) {
       res.status(500).json({ success: false, message: 'Error al eliminar configuración.' });

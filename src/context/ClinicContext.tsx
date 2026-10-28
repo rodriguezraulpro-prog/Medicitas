@@ -19,6 +19,7 @@ import {
   syncDeleteSpecialtyFromSupabase,
   syncSaveAppointmentToSupabase,
   syncDeleteAppointmentFromSupabase,
+  syncClearAllDataFromSupabase,
   uploadAllLocalDataToSupabase,
   SupabaseConfig,
 } from '../services/supabase';
@@ -205,21 +206,25 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, []);
 
   // Fetch all data from Cloud
-  const syncFromCloud = useCallback(async (): Promise<{ success: boolean; message: string }> => {
+  const syncFromCloud = useCallback(async (silent = false): Promise<{ success: boolean; message: string }> => {
     if (!isSupabaseConfigured()) {
       setIsCloudConnected(false);
       return { success: false, message: 'La conexión a la Nube no está configurada.' };
     }
 
-    setIsCloudSyncing(true);
+    if (!silent) {
+      setIsCloudSyncing(true);
+    }
     setCloudError(null);
 
     try {
       const data = await fetchClinicDataFromSupabase();
       if (!data) {
-        setCloudError('No se pudo obtener datos de la Nube. Revisa tus credenciales o conexión a internet.');
-        setIsCloudConnected(false);
-        setIsCloudSyncing(false);
+        if (!silent) {
+          setCloudError('No se pudo obtener datos de la Nube. Revisa tus credenciales o conexión a internet.');
+          setIsCloudConnected(false);
+          setIsCloudSyncing(false);
+        }
         return { success: false, message: 'No se pudo obtener respuesta de la Nube.' };
       }
 
@@ -233,16 +238,20 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       setIsCloudConnected(true);
       setLastCloudSync(new Date());
-      setIsCloudSyncing(false);
+      if (!silent) {
+        setIsCloudSyncing(false);
+      }
 
       return {
         success: true,
         message: `Sincronización exitosa con la Nube: ${data.doctors.length} médicos, ${data.specialties.length} especialidades, ${data.appointments.length} citas.`,
       };
     } catch (err: any) {
-      setCloudError(err?.message || 'Error al conectar con la Nube.');
-      setIsCloudConnected(false);
-      setIsCloudSyncing(false);
+      if (!silent) {
+        setCloudError(err?.message || 'Error al conectar con la Nube.');
+        setIsCloudConnected(false);
+        setIsCloudSyncing(false);
+      }
       return { success: false, message: err?.message || 'Error de sincronización con la Nube.' };
     }
   }, []);
@@ -287,35 +296,51 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     setIsCloudSyncing(true);
-    const test = await testSupabaseConnection(newConfig);
+    const cleanConfig = { url: newConfig.url.trim(), anonKey: newConfig.anonKey.trim() };
+    const test = await testSupabaseConnection(cleanConfig);
     if (!test.success) {
       setIsCloudSyncing(false);
       setCloudError(test.message);
       return test;
     }
 
-    // Save both locally and to server so all devices (phones, tablets, PCs) get it
-    await saveServerSupabaseConfig(newConfig);
-    setSupabaseConfigState(newConfig);
-    setSupabaseClientConfig(newConfig);
+    // Save both locally and to server/worker so all devices (phones, tablets, PCs) get it
+    await saveServerSupabaseConfig(cleanConfig);
+    setSupabaseConfigState(cleanConfig);
+    setSupabaseClientConfig(cleanConfig);
     setIsCloudConnected(true);
     setCloudError(null);
 
-    // Try to load cloud data if available, or upload local if cloud is empty
+    // Load cloud data if available; NEVER overwrite remote data from a fresh/blank device
     const cloudData = await fetchClinicDataFromSupabase();
-    if (
+    const hasRemoteData = Boolean(
       cloudData &&
-      (cloudData.doctors.length > 0 ||
-        cloudData.appointments.length > 0 ||
-        cloudData.specialties.length > 0)
-    ) {
+        (cloudData.doctors.length > 0 ||
+          cloudData.appointments.length > 0 ||
+          cloudData.specialties.length > 0 ||
+          (cloudData.clinicConfig &&
+            (cloudData.clinicConfig.name !== initialClinicConfig.name ||
+              cloudData.clinicConfig.whatsappNumber !== '' ||
+              cloudData.clinicConfig.phone !== '' ||
+              cloudData.clinicConfig.address !== '')))
+    );
+
+    const hasLocalCustomData =
+      doctors.length > 0 ||
+      specialties.length > 0 ||
+      appointments.length > 0 ||
+      clinicConfig.name !== initialClinicConfig.name ||
+      clinicConfig.whatsappNumber !== '' ||
+      clinicConfig.phone !== '';
+
+    if (cloudData && (hasRemoteData || !hasLocalCustomData)) {
       if (cloudData.clinicConfig) setClinicConfig(cloudData.clinicConfig);
       setSpecialties(cloudData.specialties);
       setDoctors(cloudData.doctors);
       setAppointments(cloudData.appointments);
       setBlockedSlots(cloudData.blockedSlots);
-    } else {
-      // Cloud is brand new, upload current local clinic data
+    } else if (hasLocalCustomData) {
+      // Cloud is completely brand new and this device has local data to seed
       await uploadAllLocalDataToSupabase({
         clinicConfig,
         specialties,
@@ -329,17 +354,16 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setIsCloudSyncing(false);
     return {
       success: true,
-      message: '¡Conexión establecida y guardada en el servidor! Ahora todos los teléfonos y computadoras sincronizan con la misma base de datos.',
+      message: '¡Conexión establecida y sincronizada! Todos los dispositivos conectados a esta base de datos reflejarán los datos en tiempo real.',
     };
   };
 
-  // Initial cloud check on mount & Realtime subscription
+  // Initial cloud check on mount
   useEffect(() => {
     let isMounted = true;
-    let realtimeChannel: any = null;
 
     async function initCloudConfig() {
-      // 1. Try to fetch from server so ALL devices (phones, tablets, PCs) get credentials automatically
+      // 1. Try to fetch from URL (?cloud=...), server/worker (/api/config/supabase), static /cloud-config.json, or env vars
       const serverCfg = await fetchServerSupabaseConfig();
       if (!isMounted) return;
 
@@ -348,8 +372,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       if (serverCfg && serverCfg.url && serverCfg.anonKey) {
         effectiveCfg = serverCfg;
       } else {
-        // 2. If server has none yet, check if current browser already has it (e.g. from PC admin)
-        // and upload it to the server so mobile phones can receive it!
+        // 2. If server has none yet, check if current browser already has it in localStorage/env
+        // and upload it to the server/worker so mobile phones and other PCs can receive it!
         const localCfg = getStoredSupabaseConfig();
         if (localCfg.url && localCfg.anonKey) {
           effectiveCfg = localCfg;
@@ -360,24 +384,10 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
 
       if (effectiveCfg && effectiveCfg.url && effectiveCfg.anonKey) {
+        saveStoredSupabaseConfig(effectiveCfg);
         setSupabaseConfigState(effectiveCfg);
         setSupabaseClientConfig(effectiveCfg);
         await syncFromCloud();
-
-        // Setup Realtime listener for appointments
-        const client = getSupabaseClient();
-        if (client && isMounted) {
-          realtimeChannel = client
-            .channel('public:appointments')
-            .on(
-              'postgres_changes',
-              { event: '*', schema: 'public', table: 'appointments' },
-              () => {
-                syncFromCloud();
-              }
-            )
-            .subscribe();
-        }
       }
     }
 
@@ -385,14 +395,49 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     return () => {
       isMounted = false;
-      if (realtimeChannel) {
-        const client = getSupabaseClient();
-        if (client) {
-          client.removeChannel(realtimeChannel);
-        }
-      }
     };
   }, [syncFromCloud]);
+
+  // Realtime subscription across ALL tables + Auto-sync on window focus & periodic interval
+  useEffect(() => {
+    if (!supabaseConfig.url || !supabaseConfig.anonKey) return;
+
+    const client = getSupabaseClient();
+    if (!client) return;
+
+    const realtimeChannel = client
+      .channel('medicitas-realtime-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public' },
+        () => {
+          syncFromCloud(true);
+        }
+      )
+      .subscribe();
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        syncFromCloud(true);
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        syncFromCloud(true);
+      }
+    }, 20000);
+
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.clearInterval(intervalId);
+      client.removeChannel(realtimeChannel);
+    };
+  }, [supabaseConfig.url, supabaseConfig.anonKey, syncFromCloud]);
 
   // --------------------------------------------------------------------------
   // Core Domain Operations (Auto-sync to Supabase in background when configured)
@@ -503,7 +548,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setDoctors(prev => [...prev, newDoc]);
 
     if (isCloudConnected || isSupabaseConfigured()) {
-      syncSaveDoctorToSupabase(newDoc).catch(err =>
+      const matchingSpec = specialties.find(s => s.id === newDoc.specialtyId);
+      syncSaveDoctorToSupabase(newDoc, matchingSpec).catch(err =>
         console.warn('Background sync error (addDoctor):', err)
       );
     }
@@ -516,7 +562,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const next = prev.map(doc => (doc.id === id ? { ...doc, ...updates } : doc));
       const target = next.find(doc => doc.id === id);
       if (target && (isCloudConnected || isSupabaseConfigured())) {
-        syncSaveDoctorToSupabase(target).catch(err =>
+        const matchingSpec = specialties.find(s => s.id === target.specialtyId);
+        syncSaveDoctorToSupabase(target, matchingSpec).catch(err =>
           console.warn('Background sync error (updateDoctor):', err)
         );
       }
@@ -529,7 +576,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const next = prev.map(doc => (doc.id === id ? { ...doc, active: !doc.active } : doc));
       const target = next.find(doc => doc.id === id);
       if (target && (isCloudConnected || isSupabaseConfigured())) {
-        syncSaveDoctorToSupabase(target).catch(err =>
+        const matchingSpec = specialties.find(s => s.id === target.specialtyId);
+        syncSaveDoctorToSupabase(target, matchingSpec).catch(err =>
           console.warn('Background sync error (toggleDoctorActive):', err)
         );
       }
@@ -612,6 +660,12 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     localStorage.removeItem(STORAGE_KEYS.SPECIALTIES);
     localStorage.removeItem(STORAGE_KEYS.CONFIG);
     localStorage.removeItem(STORAGE_KEYS.BLOCKED);
+
+    if (isCloudConnected || isSupabaseConfigured()) {
+      syncClearAllDataFromSupabase(initialClinicConfig).catch(err =>
+        console.warn('Background sync error (clearAllData):', err)
+      );
+    }
   };
 
   const resetToDemoData = clearAllData;
