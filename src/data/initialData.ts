@@ -3,7 +3,7 @@ import { DEFAULT_PIN_HASH } from '../utils/pinSecurity';
 
 export const initialClinicConfig: ClinicConfig = {
   name: 'Mi Consultorio Médico',
-  tagline: 'Gestión y Reserva Médica por WhatsApp',
+  tagline: 'Gestión y Reserva Médica',
   phone: '',
   whatsappCountryCode: '',
   whatsappNumber: '',

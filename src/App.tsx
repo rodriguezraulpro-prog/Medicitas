@@ -66,6 +66,12 @@ function AppContent() {
     };
   }, []);
 
+  useEffect(() => {
+    document.title = isAdminPath
+      ? 'Panel Administrativo - MediCitas'
+      : 'MediCitas - Gestión y Reserva Médica';
+  }, [isAdminPath]);
+
   if (isAdminPath) {
     return <AdminApp />;
   }

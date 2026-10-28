@@ -117,7 +117,14 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [clinicConfig, setClinicConfig] = useState<ClinicConfig>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.CONFIG);
-      return saved ? JSON.parse(saved) : initialClinicConfig;
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.tagline === 'Gestión y Reserva Médica por WhatsApp') {
+          parsed.tagline = 'Gestión y Reserva Médica';
+        }
+        return parsed;
+      }
+      return initialClinicConfig;
     } catch {
       return initialClinicConfig;
     }
@@ -229,7 +236,14 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
 
       if (data.clinicConfig) {
-        setClinicConfig(data.clinicConfig);
+        const normalizedConfig = {
+          ...data.clinicConfig,
+          tagline:
+            data.clinicConfig.tagline === 'Gestión y Reserva Médica por WhatsApp'
+              ? 'Gestión y Reserva Médica'
+              : data.clinicConfig.tagline,
+        };
+        setClinicConfig(normalizedConfig);
       }
       setSpecialties(data.specialties);
       setDoctors(data.doctors);

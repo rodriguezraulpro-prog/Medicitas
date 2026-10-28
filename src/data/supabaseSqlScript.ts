@@ -131,7 +131,7 @@ INSERT INTO public.clinic_config (id, name, tagline, phone, whatsapp_country_cod
 VALUES (
     'default',
     'Mi Consultorio Médico',
-    'Gestión y Reserva Médica por WhatsApp',
+    'Gestión y Reserva Médica',
     '',
     '',
     '',
