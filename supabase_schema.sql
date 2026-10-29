@@ -133,7 +133,7 @@ INSERT INTO public.clinic_config (id, name, tagline, phone, whatsapp_country_cod
 VALUES (
     'default',
     'Mi Consultorio Médico',
-    'Gestión y Reserva Médica por WhatsApp',
+    'Gestión y Reserva Médica',
     '',
     '',
     '',
@@ -150,3 +150,4 @@ VALUES (
 ALTER TABLE IF EXISTS public.appointments ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
 ALTER TABLE IF EXISTS public.appointments ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
 ALTER TABLE IF EXISTS public.appointments ADD COLUMN IF NOT EXISTS cancelled_at TEXT;
+NOTIFY pgrst, 'reload schema';

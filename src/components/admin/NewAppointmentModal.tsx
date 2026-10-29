@@ -242,7 +242,7 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({ onClos
       return;
     }
 
-    // Create the appointment
+    // Create the appointment atomically with its initial status
     const newApp = addAppointment({
       patientName: patientName.trim(),
       patientDni: patientDni.trim(),
@@ -259,13 +259,8 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({ onClos
       consultorio: selectedDoctor.consultorio,
       reason: reason.trim(),
       notes: notes.trim() || undefined,
+      status: markAsConfirmed ? 'confirmada' : 'pendiente_whatsapp',
     });
-
-    // If marked as confirmed directly at the front desk
-    if (markAsConfirmed) {
-      updateAppointmentStatus(newApp.id, 'confirmada');
-      newApp.status = 'confirmada';
-    }
 
     // Open WhatsApp to send confirmation if enabled
     if (sendWhatsAppDirect) {

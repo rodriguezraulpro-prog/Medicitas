@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { Appointment, Doctor, Specialty, ClinicConfig, AppointmentStatus, BlockedSlot } from '../types';
 import { initialAppointments, initialDoctors, initialSpecialties, initialClinicConfig } from '../data/initialData';
 import { encodePinForStorage } from '../utils/pinSecurity';
@@ -30,7 +30,9 @@ interface ClinicContextType {
   specialties: Specialty[];
   clinicConfig: ClinicConfig;
   blockedSlots: BlockedSlot[];
-  addAppointment: (appointment: Omit<Appointment, 'id' | 'createdAt' | 'status'>) => Appointment;
+  addAppointment: (
+    appointment: Omit<Appointment, 'id' | 'createdAt' | 'status'> & { status?: AppointmentStatus }
+  ) => Appointment;
   updateAppointmentStatus: (id: string, status: AppointmentStatus) => void;
   updateAppointment: (id: string, updates: Partial<Appointment>) => void;
   cancelAppointment: (id: string, reason: string, cancelledBy: 'paciente' | 'clinica') => void;
@@ -55,7 +57,7 @@ interface ClinicContextType {
   lastCloudSync: Date | null;
   supabaseConfig: SupabaseConfig;
   setCloudConfig: (config: SupabaseConfig) => Promise<{ success: boolean; message: string }>;
-  syncFromCloud: () => Promise<{ success: boolean; message: string }>;
+  syncFromCloud: (silent?: boolean) => Promise<{ success: boolean; message: string }>;
   syncToCloud: () => Promise<{ success: boolean; message: string }>;
 }
 
@@ -212,6 +214,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return () => window.removeEventListener('storage', handleStorageEvent);
   }, []);
 
+  const deletedAppointmentIdsRef = useRef<Set<string>>(new Set());
+
   // Fetch all data from Cloud
   const syncFromCloud = useCallback(async (silent = false): Promise<{ success: boolean; message: string }> => {
     if (!isSupabaseConfigured()) {
@@ -247,7 +251,22 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
       setSpecialties(data.specialties);
       setDoctors(data.doctors);
-      setAppointments(data.appointments);
+      setAppointments(prev => {
+        const remoteIds = new Set(data.appointments.map(a => a.id));
+        const unsyncedLocal = prev.filter(
+          localApp =>
+            !remoteIds.has(localApp.id) && !deletedAppointmentIdsRef.current.has(localApp.id)
+        );
+        if (unsyncedLocal.length > 0) {
+          unsyncedLocal.forEach(app => {
+            syncSaveAppointmentToSupabase(app).catch(err =>
+              console.warn('Auto-uploading unsynced local appointment error:', err)
+            );
+          });
+          return [...unsyncedLocal, ...data.appointments];
+        }
+        return data.appointments;
+      });
       setBlockedSlots(data.blockedSlots);
 
       setIsCloudConnected(true);
@@ -351,7 +370,20 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       if (cloudData.clinicConfig) setClinicConfig(cloudData.clinicConfig);
       setSpecialties(cloudData.specialties);
       setDoctors(cloudData.doctors);
-      setAppointments(cloudData.appointments);
+      setAppointments(prev => {
+        const remoteIds = new Set(cloudData.appointments.map(a => a.id));
+        const unsyncedLocal = prev.filter(
+          localApp =>
+            !remoteIds.has(localApp.id) && !deletedAppointmentIdsRef.current.has(localApp.id)
+        );
+        if (unsyncedLocal.length > 0) {
+          unsyncedLocal.forEach(app => {
+            syncSaveAppointmentToSupabase(app).catch(() => {});
+          });
+          return [...unsyncedLocal, ...cloudData.appointments];
+        }
+        return cloudData.appointments;
+      });
       setBlockedSlots(cloudData.blockedSlots);
     } else if (hasLocalCustomData) {
       // Cloud is completely brand new and this device has local data to seed
@@ -443,7 +475,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       if (document.visibilityState === 'visible') {
         syncFromCloud(true);
       }
-    }, 20000);
+    }, 10000);
 
     return () => {
       window.removeEventListener('focus', handleVisibilityOrFocus);
@@ -457,21 +489,30 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   // Core Domain Operations (Auto-sync to Supabase in background when configured)
   // --------------------------------------------------------------------------
 
-  const addAppointment = (data: Omit<Appointment, 'id' | 'createdAt' | 'status'>): Appointment => {
+  const addAppointment = (
+    data: Omit<Appointment, 'id' | 'createdAt' | 'status'> & { status?: AppointmentStatus }
+  ): Appointment => {
     const id = `MC-${Math.floor(1000 + Math.random() * 9000)}`;
     const newAppointment: Appointment = {
       ...data,
       id,
-      status: 'pendiente_whatsapp',
+      status: data.status || 'pendiente_whatsapp',
       createdAt: new Date().toISOString(),
     };
-    setAppointments(prev => [newAppointment, ...prev]);
 
-    if (isCloudConnected || isSupabaseConfigured()) {
-      syncSaveAppointmentToSupabase(newAppointment).catch(err =>
-        console.warn('Background sync error (addAppointment):', err)
-      );
-    }
+    setAppointments(prev => {
+      const next = [newAppointment, ...prev];
+      try {
+        localStorage.setItem(STORAGE_KEYS.APPOINTMENTS, JSON.stringify(next));
+      } catch {
+        // ignore storage error
+      }
+      return next;
+    });
+
+    syncSaveAppointmentToSupabase(newAppointment).catch(err =>
+      console.warn('Background sync error (addAppointment):', err)
+    );
 
     return newAppointment;
   };
@@ -487,7 +528,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       const next = prev.map(app => (app.id === id ? { ...app, status } : app));
       const target = next.find(app => app.id === id);
-      if (target && (isCloudConnected || isSupabaseConfigured())) {
+      if (target) {
         syncSaveAppointmentToSupabase(target).catch(err =>
           console.warn('Background sync error (updateAppointmentStatus):', err)
         );
@@ -507,7 +548,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       const next = prev.map(app => (app.id === id ? { ...app, ...updates } : app));
       const target = next.find(app => app.id === id);
-      if (target && (isCloudConnected || isSupabaseConfigured())) {
+      if (target) {
         syncSaveAppointmentToSupabase(target).catch(err =>
           console.warn('Background sync error (updateAppointment):', err)
         );
@@ -538,7 +579,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       });
 
       const target = next.find(app => app.id === id);
-      if (target && (isCloudConnected || isSupabaseConfigured())) {
+      if (target) {
         syncSaveAppointmentToSupabase(target).catch(err =>
           console.warn('Background sync error (cancelAppointment):', err)
         );
@@ -548,12 +589,11 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   const deleteAppointment = (id: string) => {
+    deletedAppointmentIdsRef.current.add(id);
     setAppointments(prev => prev.filter(app => app.id !== id));
-    if (isCloudConnected || isSupabaseConfigured()) {
-      syncDeleteAppointmentFromSupabase(id).catch(err =>
-        console.warn('Background sync error (deleteAppointment):', err)
-      );
-    }
+    syncDeleteAppointmentFromSupabase(id).catch(err =>
+      console.warn('Background sync error (deleteAppointment):', err)
+    );
   };
 
   const addDoctor = (doctorData: Omit<Doctor, 'id'>): Doctor => {
@@ -561,12 +601,10 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const newDoc: Doctor = { ...doctorData, id };
     setDoctors(prev => [...prev, newDoc]);
 
-    if (isCloudConnected || isSupabaseConfigured()) {
-      const matchingSpec = specialties.find(s => s.id === newDoc.specialtyId);
-      syncSaveDoctorToSupabase(newDoc, matchingSpec).catch(err =>
-        console.warn('Background sync error (addDoctor):', err)
-      );
-    }
+    const matchingSpec = specialties.find(s => s.id === newDoc.specialtyId);
+    syncSaveDoctorToSupabase(newDoc, matchingSpec).catch(err =>
+      console.warn('Background sync error (addDoctor):', err)
+    );
 
     return newDoc;
   };
@@ -575,7 +613,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setDoctors(prev => {
       const next = prev.map(doc => (doc.id === id ? { ...doc, ...updates } : doc));
       const target = next.find(doc => doc.id === id);
-      if (target && (isCloudConnected || isSupabaseConfigured())) {
+      if (target) {
         const matchingSpec = specialties.find(s => s.id === target.specialtyId);
         syncSaveDoctorToSupabase(target, matchingSpec).catch(err =>
           console.warn('Background sync error (updateDoctor):', err)
@@ -589,7 +627,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setDoctors(prev => {
       const next = prev.map(doc => (doc.id === id ? { ...doc, active: !doc.active } : doc));
       const target = next.find(doc => doc.id === id);
-      if (target && (isCloudConnected || isSupabaseConfigured())) {
+      if (target) {
         const matchingSpec = specialties.find(s => s.id === target.specialtyId);
         syncSaveDoctorToSupabase(target, matchingSpec).catch(err =>
           console.warn('Background sync error (toggleDoctorActive):', err)
@@ -603,11 +641,9 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setDoctors(prev => prev.filter(doc => doc.id !== id));
     setBlockedSlots(prev => prev.filter(b => b.doctorId !== id));
 
-    if (isCloudConnected || isSupabaseConfigured()) {
-      syncDeleteDoctorFromSupabase(id).catch(err =>
-        console.warn('Background sync error (deleteDoctor):', err)
-      );
-    }
+    syncDeleteDoctorFromSupabase(id).catch(err =>
+      console.warn('Background sync error (deleteDoctor):', err)
+    );
   };
 
   const addSpecialty = (specialtyData: Omit<Specialty, 'id'>): Specialty => {
@@ -615,11 +651,9 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const newSpec: Specialty = { ...specialtyData, id };
     setSpecialties(prev => [...prev, newSpec]);
 
-    if (isCloudConnected || isSupabaseConfigured()) {
-      syncSaveSpecialtyToSupabase(newSpec).catch(err =>
-        console.warn('Background sync error (addSpecialty):', err)
-      );
-    }
+    syncSaveSpecialtyToSupabase(newSpec).catch(err =>
+      console.warn('Background sync error (addSpecialty):', err)
+    );
 
     return newSpec;
   };
@@ -628,7 +662,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setSpecialties(prev => {
       const next = prev.map(spec => (spec.id === id ? { ...spec, ...updates } : spec));
       const target = next.find(spec => spec.id === id);
-      if (target && (isCloudConnected || isSupabaseConfigured())) {
+      if (target) {
         syncSaveSpecialtyToSupabase(target).catch(err =>
           console.warn('Background sync error (updateSpecialty):', err)
         );
@@ -640,11 +674,9 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const deleteSpecialty = (id: string) => {
     setSpecialties(prev => prev.filter(spec => spec.id !== id));
 
-    if (isCloudConnected || isSupabaseConfigured()) {
-      syncDeleteSpecialtyFromSupabase(id).catch(err =>
-        console.warn('Background sync error (deleteSpecialty):', err)
-      );
-    }
+    syncDeleteSpecialtyFromSupabase(id).catch(err =>
+      console.warn('Background sync error (deleteSpecialty):', err)
+    );
   };
 
   const updateClinicConfig = (updates: Partial<ClinicConfig>) => {
@@ -654,16 +686,15 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         normalizedUpdates.adminPin = encodePinForStorage(normalizedUpdates.adminPin);
       }
       const next = { ...prev, ...normalizedUpdates };
-      if (isCloudConnected || isSupabaseConfigured()) {
-        syncSaveConfigToSupabase(next).catch(err =>
-          console.warn('Background sync error (updateClinicConfig):', err)
-        );
-      }
+      syncSaveConfigToSupabase(next).catch(err =>
+        console.warn('Background sync error (updateClinicConfig):', err)
+      );
       return next;
     });
   };
 
   const clearAllData = () => {
+    appointments.forEach(a => deletedAppointmentIdsRef.current.add(a.id));
     setAppointments([]);
     setDoctors([]);
     setSpecialties([]);
@@ -675,11 +706,9 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     localStorage.removeItem(STORAGE_KEYS.CONFIG);
     localStorage.removeItem(STORAGE_KEYS.BLOCKED);
 
-    if (isCloudConnected || isSupabaseConfigured()) {
-      syncClearAllDataFromSupabase(initialClinicConfig).catch(err =>
-        console.warn('Background sync error (clearAllData):', err)
-      );
-    }
+    syncClearAllDataFromSupabase(initialClinicConfig).catch(err =>
+      console.warn('Background sync error (clearAllData):', err)
+    );
   };
 
   const resetToDemoData = clearAllData;

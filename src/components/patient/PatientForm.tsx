@@ -3,6 +3,7 @@ import { useClinic } from '../../context/ClinicContext';
 import { Doctor, Specialty, ConsultationType, Appointment } from '../../types';
 import { ArrowLeft, User, Phone, Mail, FileText, Send, Sparkles, Shield, AlertCircle, Building, Video } from 'lucide-react';
 import { formatDatePretty, formatTimePretty, generatePatientWhatsAppMessage, buildWhatsAppUrl } from '../../utils/whatsapp';
+import { syncSaveAppointmentToSupabase } from '../../services/supabase';
 
 interface PatientFormProps {
   specialty: Specialty;
@@ -33,7 +34,7 @@ export const PatientForm: React.FC<PatientFormProps> = ({
   const [errorMsg, setErrorMsg] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
 
@@ -73,6 +74,16 @@ export const PatientForm: React.FC<PatientFormProps> = ({
         consultorio: doctor.consultorio,
         notes: notes.trim() || undefined,
       });
+
+      // Ensure appointment is persisted to Cloud DB before launching external WhatsApp app on mobile
+      try {
+        await Promise.race([
+          syncSaveAppointmentToSupabase(newApp),
+          new Promise(resolve => setTimeout(resolve, 2500)),
+        ]);
+      } catch (syncErr) {
+        console.warn('Cloud save warning on submit:', syncErr);
+      }
 
       // Prepare WhatsApp message & URL
       const waMessage = generatePatientWhatsAppMessage(newApp, clinicConfig);
@@ -303,10 +314,14 @@ export const PatientForm: React.FC<PatientFormProps> = ({
             id="btn-submit-appointment"
             type="submit"
             disabled={isSubmitting}
-            className="w-full py-3.5 px-4 rounded-xl text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 shadow-md shadow-blue-600/25 flex items-center justify-center gap-2 transition-all transform active:scale-[0.99] cursor-pointer"
+            className="w-full py-3.5 px-4 rounded-xl text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-75 shadow-md shadow-blue-600/25 flex items-center justify-center gap-2 transition-all transform active:scale-[0.99] cursor-pointer"
           >
             <Send className="w-4 h-4" />
-            <span>Confirmar y Enviar al WhatsApp de la Clínica</span>
+            <span>
+              {isSubmitting
+                ? 'Registrando cita en el sistema...'
+                : 'Confirmar y Enviar al WhatsApp de la Clínica'}
+            </span>
           </button>
 
           <p className="text-[11px] text-center text-slate-600 mt-2">

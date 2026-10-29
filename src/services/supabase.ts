@@ -258,15 +258,32 @@ export async function saveServerSupabaseConfig(config: SupabaseConfig): Promise<
   };
 }
 
+function createResilientSupabaseClient(url: string, anonKey: string): SupabaseClient {
+  return createClient(url, anonKey, {
+    auth: {
+      persistSession: false,
+    },
+    global: {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+        const method = (init?.method || 'GET').toUpperCase();
+        const isWrite = method === 'POST' || method === 'PATCH' || method === 'PUT' || method === 'DELETE';
+        const bodyLength = typeof init?.body === 'string' ? init.body.length : 0;
+        if (isWrite && bodyLength < 60000) {
+          return fetch(input, { ...init, keepalive: true });
+        }
+        return fetch(input, init);
+      },
+    },
+  });
+}
+
 export function setSupabaseClientConfig(config: SupabaseConfig | null): void {
   activeClient = null;
   if (config && isValidConfig(config.url, config.anonKey)) {
     const normalized = { url: config.url.trim(), anonKey: config.anonKey.trim() };
     memoryStoredConfig = normalized;
     try {
-      activeClient = createClient(normalized.url, normalized.anonKey, {
-        auth: { persistSession: false },
-      });
+      activeClient = createResilientSupabaseClient(normalized.url, normalized.anonKey);
     } catch (err) {
       console.warn('Failed to set Supabase client config:', err);
     }
@@ -279,11 +296,7 @@ export function getSupabaseClient(): SupabaseClient | null {
   const config = getStoredSupabaseConfig();
   if (isValidConfig(config.url, config.anonKey)) {
     try {
-      activeClient = createClient(config.url, config.anonKey, {
-        auth: {
-          persistSession: false,
-        },
-      });
+      activeClient = createResilientSupabaseClient(config.url, config.anonKey);
       return activeClient;
     } catch (err) {
       console.warn('Failed to initialize Supabase client:', err);
@@ -479,21 +492,25 @@ export function mapAppointmentToDb(app: Appointment, includeCancellationCols = t
     patient_email: app.patientEmail || null,
     patient_dni: app.patientDni || null,
     reason: app.reason || '',
-    type: app.type,
+    type: app.type || 'presencial',
     date: app.date,
     time: app.time,
     doctor_id: app.doctorId && app.doctorId.trim() !== '' ? app.doctorId : null,
     doctor_name: app.doctorName,
     specialty_id: app.specialtyId || '',
     specialty_name: app.specialtyName || '',
-    status: app.status,
-    created_at: app.createdAt,
-    fee: app.fee,
-    consultorio: app.consultorio,
+    status: app.status || 'pendiente_whatsapp',
+    created_at: app.createdAt || new Date().toISOString(),
+    fee: Number(app.fee) || 0,
+    consultorio: app.consultorio || '',
     notes: app.notes || null,
   };
 
-  if (includeCancellationCols) {
+  const hasCancellationData = Boolean(
+    app.status === 'cancelada' || app.cancellationReason || app.cancelledBy || app.cancelledAt
+  );
+
+  if (includeCancellationCols && hasCancellationData) {
     data.cancellation_reason = app.cancellationReason || null;
     data.cancelled_by = app.cancelledBy || null;
     data.cancelled_at = app.cancelledAt || null;
@@ -526,6 +543,18 @@ function mapBlockedSlotToDb(b: BlockedSlot): any {
 // Data Fetch & Operations
 // -------------------------------------------------------------
 
+async function ensureActiveSupabaseClient(): Promise<SupabaseClient | null> {
+  let client = getSupabaseClient();
+  if (client) return client;
+
+  const serverCfg = await fetchServerSupabaseConfig();
+  if (serverCfg && isValidConfig(serverCfg.url, serverCfg.anonKey)) {
+    setSupabaseClientConfig(serverCfg);
+    client = getSupabaseClient();
+  }
+  return client;
+}
+
 export async function fetchClinicDataFromSupabase(): Promise<{
   clinicConfig?: ClinicConfig;
   doctors: Doctor[];
@@ -533,7 +562,7 @@ export async function fetchClinicDataFromSupabase(): Promise<{
   appointments: Appointment[];
   blockedSlots: BlockedSlot[];
 } | null> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return null;
 
   try {
@@ -549,6 +578,10 @@ export async function fetchClinicDataFromSupabase(): Promise<{
     if (specRes.error && docRes.error && appRes.error) {
       console.warn('Supabase query error:', specRes.error);
       return null;
+    }
+
+    if (appRes.error) {
+      console.warn('Supabase appointments query warning:', appRes.error);
     }
 
     let config: ClinicConfig | undefined;
@@ -575,7 +608,7 @@ export async function fetchClinicDataFromSupabase(): Promise<{
 }
 
 export async function syncSaveConfigToSupabase(config: ClinicConfig): Promise<boolean> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
     const { error } = await client.from('clinic_config').upsert(mapConfigToDb(config));
@@ -591,7 +624,7 @@ export async function syncSaveConfigToSupabase(config: ClinicConfig): Promise<bo
 }
 
 export async function syncSaveDoctorToSupabase(doctor: Doctor, specialty?: Specialty): Promise<boolean> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
     if (specialty) {
@@ -617,7 +650,7 @@ export async function syncSaveDoctorToSupabase(doctor: Doctor, specialty?: Speci
 }
 
 export async function syncDeleteDoctorFromSupabase(id: string): Promise<boolean> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
     const { error } = await client.from('doctors').delete().eq('id', id);
@@ -629,7 +662,7 @@ export async function syncDeleteDoctorFromSupabase(id: string): Promise<boolean>
 }
 
 export async function syncSaveSpecialtyToSupabase(specialty: Specialty): Promise<boolean> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
     const { error } = await client.from('specialties').upsert(mapSpecialtyToDb(specialty));
@@ -645,7 +678,7 @@ export async function syncSaveSpecialtyToSupabase(specialty: Specialty): Promise
 }
 
 export async function syncDeleteSpecialtyFromSupabase(id: string): Promise<boolean> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
     const { error } = await client.from('specialties').delete().eq('id', id);
@@ -657,35 +690,83 @@ export async function syncDeleteSpecialtyFromSupabase(id: string): Promise<boole
 }
 
 export async function syncSaveAppointmentToSupabase(appointment: Appointment): Promise<boolean> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return false;
+
   try {
-    const payload = mapAppointmentToDb(appointment, true);
-    const { error } = await client.from('appointments').upsert(payload);
-    if (error) {
-      if (error.code === '42703') {
-        // If cancellation columns are not present in Supabase table yet, retry without them
-        const fallbackCols = mapAppointmentToDb(appointment, false);
-        const { error: retryError } = await client.from('appointments').upsert(fallbackCols);
-        if (retryError && retryError.code === '23503') {
-          const { error: retryNoDoc } = await client
-            .from('appointments')
-            .upsert({ ...fallbackCols, doctor_id: null });
-          return !retryNoDoc;
+    const currentPayload: Record<string, any> = { ...mapAppointmentToDb(appointment, true) };
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const { error } = await client.from('appointments').upsert(currentPayload);
+      if (!error) {
+        return true;
+      }
+
+      const errCode = String(error.code || '');
+      const errMsg = String(error.message || '');
+      const errDetails = String(error.details || '');
+      const combinedMsg = `${errMsg} ${errDetails}`;
+
+      // 1. Handle missing column errors (PostgREST PGRST204 or PostgreSQL 42703)
+      const isColumnError =
+        errCode === 'PGRST204' ||
+        errCode === '42703' ||
+        /column|schema cache/i.test(combinedMsg);
+
+      if (isColumnError) {
+        let removedAny = false;
+
+        // Extract specific offending column name if mentioned in error message
+        const colMatch =
+          combinedMsg.match(/['"]([a-zA-Z0-9_]+)['"]\s+column/i) ||
+          combinedMsg.match(/column\s+['"]([a-zA-Z0-9_]+)['"]/i);
+
+        if (colMatch) {
+          const offendingCol = colMatch[1] || colMatch[2];
+          if (offendingCol && offendingCol in currentPayload && offendingCol !== 'id') {
+            delete currentPayload[offendingCol];
+            removedAny = true;
+          }
         }
-        return !retryError;
+
+        // Also strip cancellation columns if present
+        if (
+          'cancellation_reason' in currentPayload ||
+          'cancelled_by' in currentPayload ||
+          'cancelled_at' in currentPayload
+        ) {
+          delete currentPayload.cancellation_reason;
+          delete currentPayload.cancelled_by;
+          delete currentPayload.cancelled_at;
+          removedAny = true;
+        } else if (!removedAny && 'patient_dni' in currentPayload) {
+          delete currentPayload.patient_dni;
+          removedAny = true;
+        }
+
+        if (removedAny) {
+          continue;
+        }
       }
-      if (error.code === '23503') {
-        // Foreign key violation if doctor_id is not in remote doctors table yet
-        const { error: retryNoDoc } = await client
-          .from('appointments')
-          .upsert({ ...payload, doctor_id: null });
-        return !retryNoDoc;
+
+      // 2. Handle Foreign Key constraint violations (PostgreSQL 23503)
+      const isFkError = errCode === '23503' || /foreign key/i.test(combinedMsg);
+      if (isFkError) {
+        if (currentPayload.doctor_id !== null) {
+          currentPayload.doctor_id = null;
+          continue;
+        }
+        if (currentPayload.specialty_id !== null) {
+          currentPayload.specialty_id = null;
+          continue;
+        }
       }
+
       console.warn('Error syncing appointment to Supabase:', error);
       return false;
     }
-    return true;
+
+    return false;
   } catch (err) {
     console.warn('Error syncing appointment to Supabase:', err);
     return false;
@@ -693,7 +774,7 @@ export async function syncSaveAppointmentToSupabase(appointment: Appointment): P
 }
 
 export async function syncDeleteAppointmentFromSupabase(id: string): Promise<boolean> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
     const { error } = await client.from('appointments').delete().eq('id', id);
@@ -705,7 +786,7 @@ export async function syncDeleteAppointmentFromSupabase(id: string): Promise<boo
 }
 
 export async function syncClearAllDataFromSupabase(defaultConfig: ClinicConfig): Promise<boolean> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
     await client.from('appointments').delete().neq('id', '__none__');
@@ -728,7 +809,7 @@ export async function uploadAllLocalDataToSupabase(payload: {
   appointments: Appointment[];
   blockedSlots: BlockedSlot[];
 }): Promise<{ success: boolean; message: string }> {
-  const client = getSupabaseClient();
+  const client = await ensureActiveSupabaseClient();
   if (!client) {
     return { success: false, message: 'La conexión a la Nube no está configurada.' };
   }
@@ -750,14 +831,19 @@ export async function uploadAllLocalDataToSupabase(payload: {
       if (docErr) throw new Error(`Doctors error: ${docErr.message}`);
     }
 
-    // 4. Appointments
+    // 4. Appointments (using resilient per-appointment fallback if batch fails)
     if (payload.appointments.length > 0) {
-      let { error: appErr } = await client.from('appointments').upsert(payload.appointments.map(a => mapAppointmentToDb(a, true)));
-      if (appErr && appErr.code === '42703') {
-        const { error: retryErr } = await client.from('appointments').upsert(payload.appointments.map(a => mapAppointmentToDb(a, false)));
-        appErr = retryErr;
+      const { error: appErr } = await client
+        .from('appointments')
+        .upsert(payload.appointments.map(a => mapAppointmentToDb(a, false)));
+      if (appErr) {
+        const results = await Promise.all(
+          payload.appointments.map(a => syncSaveAppointmentToSupabase(a))
+        );
+        if (results.some(ok => !ok)) {
+          throw new Error(`Appointments error: ${appErr.message}`);
+        }
       }
-      if (appErr) throw new Error(`Appointments error: ${appErr.message}`);
     }
 
     // 5. Blocked slots

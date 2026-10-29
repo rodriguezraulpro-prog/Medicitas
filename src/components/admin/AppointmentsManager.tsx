@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useClinic } from '../../context/ClinicContext';
 import { Appointment, AppointmentStatus } from '../../types';
 import {
@@ -48,7 +48,14 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     clinicConfig,
     doctors,
     specialties,
+    syncFromCloud,
+    isCloudSyncing,
   } = useClinic();
+
+  // Refresh appointments from Cloud whenever the admin opens the Appointments tab
+  useEffect(() => {
+    syncFromCloud(true);
+  }, [syncFromCloud]);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -278,11 +285,22 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            id="btn-admin-refresh-appointments"
+            onClick={() => syncFromCloud(false)}
+            disabled={isCloudSyncing}
+            className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60"
+            title="Sincronizar citas desde la Nube"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isCloudSyncing ? 'animate-spin' : ''}`} />
+            <span>{isCloudSyncing ? 'Sincronizando...' : 'Actualizar'}</span>
+          </button>
+
           <button
             id="btn-admin-export-csv"
             onClick={handleExportCSV}
-            className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+            className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
             title="Exportar citas filtradas a Excel/CSV"
           >
             <Download className="w-3.5 h-3.5 text-slate-500" />
@@ -292,7 +310,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
           <button
             id="btn-admin-new-appointment"
             onClick={() => onOpenNewAppointmentModal()}
-            className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
+            className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Nueva Cita Presencial</span>

@@ -12,7 +12,7 @@ export const SUPABASE_SQL_SCHEMA = `-- =========================================
 CREATE TABLE IF NOT EXISTS public.clinic_config (
     id TEXT PRIMARY KEY DEFAULT 'default',
     name TEXT NOT NULL DEFAULT 'Mi Consultorio Médico',
-    tagline TEXT DEFAULT 'Gestión y Reserva Médica por WhatsApp',
+    tagline TEXT DEFAULT 'Gestión y Reserva Médica',
     phone TEXT DEFAULT '',
     whatsapp_country_code TEXT DEFAULT '',
     whatsapp_number TEXT DEFAULT '',
