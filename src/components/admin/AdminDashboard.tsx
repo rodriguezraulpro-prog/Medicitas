@@ -82,7 +82,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
 
           <div className="bg-white/15 backdrop-blur-xs rounded-2xl p-3.5 border border-white/20">
-            <span className="text-[11px] text-blue-100 font-semibold block">Pendientes WhatsApp</span>
+            <span className="text-[11px] text-blue-100 font-semibold block">Pendiente por confirmar</span>
             <div className="flex items-baseline gap-1 mt-0.5">
               <span className="text-2xl font-extrabold text-amber-300">{pendingWhatsApp.length}</span>
               <span className="text-[10px] text-amber-200 font-medium">por confirmar</span>

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useClinic } from '../../context/ClinicContext';
 import { Appointment, AppointmentStatus } from '../../types';
 import {
@@ -25,6 +25,10 @@ import {
   Moon,
   Lock,
   AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  Trash2,
 } from 'lucide-react';
 import {
   formatDatePretty,
@@ -38,6 +42,23 @@ interface AppointmentsManagerProps {
   onOpenNewAppointmentModal: (prefill?: Partial<Appointment>) => void;
 }
 
+const MONTH_NAMES_ES = [
+  'Enero',
+  'Febrero',
+  'Marzo',
+  'Abril',
+  'Mayo',
+  'Junio',
+  'Julio',
+  'Agosto',
+  'Septiembre',
+  'Octubre',
+  'Noviembre',
+  'Diciembre',
+];
+
+const WEEKDAYS_SHORT_ES = ['Lu', 'Ma', 'Mi', 'Ju', 'Vi', 'Sá', 'Do'];
+
 export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
   onOpenNewAppointmentModal,
 }) => {
@@ -45,6 +66,8 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     appointments,
     updateAppointmentStatus,
     cancelAppointment,
+    deleteAppointment,
+    purgeCancelledAppointments,
     clinicConfig,
     doctors,
     specialties,
@@ -59,14 +82,48 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'tomorrow' | 'week'>('all');
+  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'tomorrow' | 'week' | 'custom'>('all');
+  const [specificDate, setSpecificDate] = useState<string>('');
+  const [isCalendarOpen, setIsCalendarOpen] = useState<boolean>(false);
+  const [calendarViewDate, setCalendarViewDate] = useState<Date>(() => new Date());
+  const calendarPopoverRef = useRef<HTMLDivElement | null>(null);
+
   const [timeShiftFilter, setTimeShiftFilter] = useState<'all' | 'morning' | 'afternoon'>('all');
   const [selectedSpecialtyId, setSelectedSpecialtyId] = useState<string>('all');
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('all');
 
+  // Close dropdown calendar when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        calendarPopoverRef.current &&
+        !calendarPopoverRef.current.contains(event.target as Node)
+      ) {
+        setIsCalendarOpen(false);
+      }
+    };
+    if (isCalendarOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isCalendarOpen]);
+
   // Admin cancellation modal state
   const [cancellingAppointment, setCancellingAppointment] = useState<Appointment | null>(null);
   const [adminCancelReason, setAdminCancelReason] = useState<string>('');
+
+  // Purge attended & cancelled appointments modal state
+  const [showPurgeModal, setShowPurgeModal] = useState<boolean>(false);
+  const [purgeStatusTarget, setPurgeStatusTarget] = useState<'both' | 'cancelada' | 'atendida'>('both');
+  const [purgePeriod, setPurgePeriod] = useState<
+    'past' | 'older_7' | 'older_15' | 'older_30' | 'older_90' | 'custom_range' | 'all_cancelled'
+  >('past');
+  const [purgeFromDate, setPurgeFromDate] = useState<string>('');
+  const [purgeToDate, setPurgeToDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [isPurging, setIsPurging] = useState<boolean>(false);
+  const [purgeFeedback, setPurgeFeedback] = useState<string | null>(null);
 
   const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
   const tomorrowStr = useMemo(() => {
@@ -74,6 +131,84 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     d.setDate(d.getDate() + 1);
     return d.toISOString().split('T')[0];
   }, []);
+
+  // All cleanable appointments (cancelled + attended)
+  const totalCancelledCount = useMemo(
+    () => appointments.filter(a => a.status === 'cancelada' || a.status === 'atendida').length,
+    [appointments]
+  );
+
+  // Appointments matching the selected status target and purge period
+  const matchingCancelledToPurge = useMemo(() => {
+    const getCutoffDateStr = (daysAgo: number) => {
+      const d = new Date();
+      d.setDate(d.getDate() - daysAgo);
+      return d.toISOString().split('T')[0];
+    };
+
+    return appointments.filter(app => {
+      if (purgeStatusTarget === 'both') {
+        if (app.status !== 'cancelada' && app.status !== 'atendida') return false;
+      } else if (purgeStatusTarget === 'cancelada') {
+        if (app.status !== 'cancelada') return false;
+      } else if (purgeStatusTarget === 'atendida') {
+        if (app.status !== 'atendida') return false;
+      }
+
+      if (purgePeriod === 'all_cancelled') {
+        return true;
+      }
+      if (purgePeriod === 'past') {
+        return app.date < todayStr;
+      }
+      if (purgePeriod === 'older_7') {
+        return app.date <= getCutoffDateStr(7);
+      }
+      if (purgePeriod === 'older_15') {
+        return app.date <= getCutoffDateStr(15);
+      }
+      if (purgePeriod === 'older_30') {
+        return app.date <= getCutoffDateStr(30);
+      }
+      if (purgePeriod === 'older_90') {
+        return app.date <= getCutoffDateStr(90);
+      }
+      if (purgePeriod === 'custom_range') {
+        if (purgeFromDate && app.date < purgeFromDate) return false;
+        if (purgeToDate && app.date > purgeToDate) return false;
+        return Boolean(purgeFromDate || purgeToDate);
+      }
+      return false;
+    });
+  }, [appointments, purgeStatusTarget, purgePeriod, purgeFromDate, purgeToDate, todayStr]);
+
+  const handleConfirmPurgeCancelled = async () => {
+    if (matchingCancelledToPurge.length === 0) return;
+    setIsPurging(true);
+    try {
+      const ids = matchingCancelledToPurge.map(a => a.id);
+      const deletedCount = await purgeCancelledAppointments(ids);
+      setShowPurgeModal(false);
+      const targetLabel =
+        purgeStatusTarget === 'both'
+          ? deletedCount === 1
+            ? 'cita (atendida/cancelada)'
+            : 'citas (atendidas y canceladas)'
+          : purgeStatusTarget === 'atendida'
+          ? deletedCount === 1
+            ? 'cita atendida'
+            : 'citas atendidas'
+          : deletedCount === 1
+          ? 'cita cancelada'
+          : 'citas canceladas';
+      setPurgeFeedback(
+        `Se eliminaron ${deletedCount} ${targetLabel} de la base de datos.`
+      );
+      setTimeout(() => setPurgeFeedback(null), 5000);
+    } finally {
+      setIsPurging(false);
+    }
+  };
 
   // Filter available doctors if a specialty is pre-selected
   const availableDoctors = useMemo(() => {
@@ -100,6 +235,54 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     });
     return counts;
   }, [appointments]);
+
+  // Appointment counts per date (YYYY-MM-DD) for the dropdown calendar
+  const appointmentCountsByDate = useMemo(() => {
+    const counts: Record<string, number> = {};
+    appointments.forEach(a => {
+      if (a.status !== 'cancelada') {
+        counts[a.date] = (counts[a.date] || 0) + 1;
+      }
+    });
+    return counts;
+  }, [appointments]);
+
+  // Calendar grid generation for current calendarViewDate
+  const calendarDays = useMemo(() => {
+    const year = calendarViewDate.getFullYear();
+    const month = calendarViewDate.getMonth();
+    const firstDayOfMonth = new Date(year, month, 1);
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+    // Convert Sunday=0..Saturday=6 to Monday=0..Sunday=6
+    const startWeekday = (firstDayOfMonth.getDay() + 6) % 7;
+
+    const days: Array<{ dateStr: string; dayNum: number } | null> = [];
+    for (let i = 0; i < startWeekday; i++) {
+      days.push(null);
+    }
+    for (let d = 1; d <= daysInMonth; d++) {
+      const mm = String(month + 1).padStart(2, '0');
+      const dd = String(d).padStart(2, '0');
+      days.push({
+        dateStr: `${year}-${mm}-${dd}`,
+        dayNum: d,
+      });
+    }
+    return days;
+  }, [calendarViewDate]);
+
+  const handleSelectSpecificDate = (dateStr: string) => {
+    setSpecificDate(dateStr);
+    setDateFilter('custom');
+    if (dateStr) {
+      const [y, m, d] = dateStr.split('-').map(Number);
+      if (y && m && d) {
+        setCalendarViewDate(new Date(y, m - 1, d));
+      }
+    }
+    setIsCalendarOpen(false);
+  };
 
   // Handle specialty dropdown change
   const handleSpecialtyChange = (specId: string) => {
@@ -130,6 +313,8 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     setSearchTerm('');
     setStatusFilter('all');
     setDateFilter('all');
+    setSpecificDate('');
+    setIsCalendarOpen(false);
     setTimeShiftFilter('all');
     setSelectedSpecialtyId('all');
     setSelectedDoctorId('all');
@@ -139,6 +324,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     searchTerm.trim() !== '' ||
     statusFilter !== 'all' ||
     dateFilter !== 'all' ||
+    specificDate !== '' ||
     timeShiftFilter !== 'all' ||
     selectedSpecialtyId !== 'all' ||
     selectedDoctorId !== 'all';
@@ -182,6 +368,8 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
         const now = new Date();
         const diffDays = (appDate.getTime() - now.getTime()) / (1000 * 3600 * 24);
         if (diffDays < -1 || diffDays > 7) return false;
+      } else if (dateFilter === 'custom' && specificDate) {
+        if (app.date !== specificDate) return false;
       }
 
       // Shift / Hour filter (Turno Mañana: < 13:00, Turno Tarde: >= 13:00)
@@ -200,6 +388,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     searchTerm,
     statusFilter,
     dateFilter,
+    specificDate,
     timeShiftFilter,
     selectedSpecialtyId,
     selectedDoctorId,
@@ -308,6 +497,21 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
           </button>
 
           <button
+            id="btn-admin-purge-cancelled"
+            onClick={() => setShowPurgeModal(true)}
+            className="px-3 py-2 rounded-xl border border-rose-200 bg-rose-50/80 hover:bg-rose-100 text-rose-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+            title="Limpiar de la base de datos las citas antiguas ya atendidas o canceladas de un período"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+            <span>Limpiar Atendidas / Canceladas</span>
+            {totalCancelledCount > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full bg-rose-200/90 text-rose-900 text-[10px] font-extrabold">
+                {totalCancelledCount}
+              </span>
+            )}
+          </button>
+
+          <button
             id="btn-admin-new-appointment"
             onClick={() => onOpenNewAppointmentModal()}
             className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
@@ -317,6 +521,22 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Feedback Banner after purging cancelled appointments */}
+      {purgeFeedback && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-900 px-4 py-3 rounded-2xl text-xs font-bold flex items-center justify-between gap-2 shadow-2xs animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{purgeFeedback}</span>
+          </div>
+          <button
+            onClick={() => setPurgeFeedback(null)}
+            className="text-emerald-700 hover:text-emerald-950 font-black cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Filters & Search Card */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-3.5">
@@ -347,7 +567,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
           <div className="flex items-center gap-1 overflow-x-auto no-scrollbar lg:col-span-8">
             {[
               { id: 'all', label: 'Todas' },
-              { id: 'pendiente_whatsapp', label: 'Pendientes WhatsApp' },
+              { id: 'pendiente_whatsapp', label: 'Pendiente por confirmar' },
               { id: 'confirmada', label: 'Confirmadas' },
               { id: 'atendida', label: 'Atendidas' },
               { id: 'cancelada', label: 'Canceladas' },
@@ -473,7 +693,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
         {/* Row 3: Date & Shift Filters + Active Filter Badges */}
         <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2.5 border-t border-slate-100 text-xs">
           <div className="flex flex-wrap items-center gap-3">
-            {/* Date filter pills */}
+            {/* Date filter pills + Dropdown Calendar */}
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-slate-400 font-medium text-[11px] flex items-center gap-1">
                 <Calendar className="w-3.5 h-3.5 text-slate-400" />
@@ -487,7 +707,13 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
               ].map(d => (
                 <button
                   key={d.id}
-                  onClick={() => setDateFilter(d.id as any)}
+                  onClick={() => {
+                    setDateFilter(d.id as any);
+                    if (d.id !== 'custom') {
+                      setSpecificDate('');
+                    }
+                    setIsCalendarOpen(false);
+                  }}
                   className={`px-2.5 py-0.5 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
                     dateFilter === d.id
                       ? 'bg-blue-600 text-white shadow-2xs'
@@ -497,6 +723,194 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
                   {d.label}
                 </button>
               ))}
+
+              {/* Dropdown Calendar Trigger & Popover */}
+              <div className="relative" ref={calendarPopoverRef}>
+                <div className="inline-flex items-center">
+                  <button
+                    id="btn-toggle-calendar-filter"
+                    type="button"
+                    onClick={() => setIsCalendarOpen(prev => !prev)}
+                    className={`px-2.5 py-0.5 rounded-md text-[11px] font-semibold transition-all flex items-center gap-1.5 cursor-pointer border ${
+                      dateFilter === 'custom' && specificDate
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
+                        : isCalendarOpen
+                        ? 'bg-blue-50 text-blue-700 border-blue-300 ring-2 ring-blue-100'
+                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:border-slate-300'
+                    }`}
+                    title="Abrir calendario para buscar citas en una fecha específica"
+                  >
+                    <Calendar
+                      className={`w-3 h-3 ${
+                        dateFilter === 'custom' && specificDate ? 'text-white' : 'text-blue-600'
+                      }`}
+                    />
+                    <span>
+                      {dateFilter === 'custom' && specificDate
+                        ? formatDatePretty(specificDate)
+                        : 'Elegir fecha'}
+                    </span>
+                    <ChevronDown
+                      className={`w-3 h-3 transition-transform ${
+                        isCalendarOpen ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+
+                  {dateFilter === 'custom' && specificDate && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSpecificDate('');
+                        setDateFilter('all');
+                        setIsCalendarOpen(false);
+                      }}
+                      className="ml-1 px-1.5 py-0.5 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-[10px] font-bold transition-colors cursor-pointer"
+                      title="Quitar fecha seleccionada"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                {/* Dropdown Calendar Popover */}
+                {isCalendarOpen && (
+                  <div className="absolute left-0 sm:left-auto sm:right-0 mt-2 w-72 bg-white rounded-2xl border border-slate-200 shadow-xl p-3.5 z-50 animate-in fade-in zoom-in-95 duration-150">
+                    {/* Month & Year Navigation */}
+                    <div className="flex items-center justify-between mb-2.5 pb-2 border-b border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCalendarViewDate(
+                            prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1)
+                          )
+                        }
+                        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 transition-colors cursor-pointer"
+                        title="Mes anterior"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+
+                      <div className="text-xs font-extrabold text-slate-800 tracking-tight">
+                        {MONTH_NAMES_ES[calendarViewDate.getMonth()]}{' '}
+                        {calendarViewDate.getFullYear()}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCalendarViewDate(
+                            prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1)
+                          )
+                        }
+                        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600 transition-colors cursor-pointer"
+                        title="Mes siguiente"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Weekday Headers */}
+                    <div className="grid grid-cols-7 gap-1 mb-1 text-center">
+                      {WEEKDAYS_SHORT_ES.map(dayName => (
+                        <div
+                          key={dayName}
+                          className="text-[10px] font-bold text-slate-400 uppercase py-0.5"
+                        >
+                          {dayName}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Days Grid */}
+                    <div className="grid grid-cols-7 gap-1">
+                      {calendarDays.map((cell, idx) => {
+                        if (!cell) {
+                          return <div key={`empty-${idx}`} className="h-8" />;
+                        }
+
+                        const isSelected =
+                          dateFilter === 'custom' && specificDate === cell.dateStr;
+                        const isToday = cell.dateStr === todayStr;
+                        const count = appointmentCountsByDate[cell.dateStr] || 0;
+
+                        return (
+                          <button
+                            key={cell.dateStr}
+                            type="button"
+                            onClick={() => handleSelectSpecificDate(cell.dateStr)}
+                            title={
+                              count > 0
+                                ? `${count} ${count === 1 ? 'cita activa' : 'citas activas'}`
+                                : 'Sin citas registradas'
+                            }
+                            className={`relative h-8 rounded-lg text-[11px] font-semibold flex flex-col items-center justify-center transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-blue-600 text-white font-bold shadow-xs'
+                                : isToday
+                                ? 'bg-blue-50 text-blue-700 border border-blue-300 font-bold'
+                                : count > 0
+                                ? 'bg-emerald-50/70 text-slate-800 hover:bg-blue-50 border border-emerald-200/70 font-bold'
+                                : 'text-slate-600 hover:bg-slate-100'
+                            }`}
+                          >
+                            <span className="leading-none">{cell.dayNum}</span>
+                            {count > 0 && (
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full mt-0.5 ${
+                                  isSelected ? 'bg-white' : 'bg-emerald-500'
+                                }`}
+                              />
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Direct Date Input + Legend */}
+                    <div className="mt-3 pt-2.5 border-t border-slate-100 space-y-2">
+                      <div className="flex items-center justify-between text-[10px] text-slate-500">
+                        <span className="inline-flex items-center gap-1">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+                          <span>Días con citas</span>
+                        </span>
+                        <input
+                          type="date"
+                          value={specificDate}
+                          onChange={e => {
+                            if (e.target.value) {
+                              handleSelectSpecificDate(e.target.value);
+                            }
+                          }}
+                          className="px-2 py-0.5 rounded-md border border-slate-200 bg-slate-50 text-[10px] font-semibold text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                          title="Escribir o elegir fecha directamente"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleSelectSpecificDate(todayStr)}
+                          className="flex-1 py-1.5 px-2 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-[11px] font-bold transition-colors cursor-pointer"
+                        >
+                          Ir a Hoy
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSpecificDate('');
+                            setDateFilter('all');
+                            setIsCalendarOpen(false);
+                          }}
+                          className="flex-1 py-1.5 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-semibold transition-colors cursor-pointer"
+                        >
+                          Ver todas
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Hour / Shift filter pills (Mañana / Tarde) */}
@@ -547,6 +961,23 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
 
           {/* Active filter badges & Counter */}
           <div className="flex flex-wrap items-center gap-2">
+            {dateFilter === 'custom' && specificDate && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-emerald-100 text-emerald-900 border border-emerald-200 text-[11px] font-bold">
+                <Calendar className="w-3 h-3 text-emerald-700" />
+                <span>Fecha: {formatDatePretty(specificDate)}</span>
+                <button
+                  onClick={() => {
+                    setSpecificDate('');
+                    setDateFilter('all');
+                  }}
+                  className="hover:text-rose-600 ml-1 font-black cursor-pointer"
+                  title="Quitar filtro de fecha específica"
+                >
+                  ✕
+                </button>
+              </span>
+            )}
+
             {selectedSpecialtyId !== 'all' && (
               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-blue-100 text-blue-900 border border-blue-200 text-[11px] font-bold">
                 <span>Esp: {specialties.find(s => s.id === selectedSpecialtyId)?.name}</span>
@@ -650,7 +1081,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
                         <span>Cancelada (Irreversible)</span>
                       </>
                     ) : (
-                      'Pendiente WhatsApp'
+                      'Pendiente por confirmar'
                     )}
                   </span>
 
@@ -805,6 +1236,16 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
                       <MessageCircle className="w-3.5 h-3.5 text-rose-600" />
                       <span>Notificar por WhatsApp</span>
                     </button>
+
+                    <button
+                      id={`btn-delete-cancelled-${appointment.id}`}
+                      onClick={() => deleteAppointment(appointment.id)}
+                      className="px-3 py-1.5 rounded-xl bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-700 border border-slate-200 hover:border-rose-200 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                      title="Eliminar definitivamente este registro cancelado de la base de datos"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                      <span>Borrar registro</span>
+                    </button>
                   </div>
 
                   <button
@@ -852,7 +1293,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
                       </button>
                     )}
 
-                    {!isAttended && (
+                    {!isAttended ? (
                       <button
                         id={`btn-status-attended-${appointment.id}`}
                         onClick={() => updateAppointmentStatus(appointment.id, 'atendida')}
@@ -861,6 +1302,16 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
                       >
                         <UserCheck className="w-3.5 h-3.5" />
                         <span>Atendida</span>
+                      </button>
+                    ) : (
+                      <button
+                        id={`btn-delete-attended-${appointment.id}`}
+                        onClick={() => deleteAppointment(appointment.id)}
+                        className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-700 border border-slate-200 hover:border-rose-200 text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                        title="Eliminar este registro ya atendido de la base de datos"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                        <span>Borrar registro</span>
                       </button>
                     )}
 
@@ -1034,6 +1485,278 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
               >
                 <XCircle className="w-3.5 h-3.5" />
                 <span>Confirmar Cancelación Irreversible</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Purge Attended & Cancelled Appointments by Period Modal */}
+      {showPurgeModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-150 overflow-y-auto">
+          <div className="bg-white rounded-3xl w-full max-w-lg border border-slate-200 shadow-2xl p-5 sm:p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0 border border-rose-200">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div className="space-y-0.5">
+                  <h3 className="text-base sm:text-lg font-black text-slate-900">
+                    Limpiar Citas Atendidas y Canceladas
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Elimina de la base de datos las citas antiguas{' '}
+                    <strong className="text-emerald-700">Ya Atendidas</strong> y/o{' '}
+                    <strong className="text-rose-700">Canceladas</strong> del período que elijas.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPurgeModal(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Safe Guarantee Notice */}
+            <div className="p-3 bg-blue-50/80 rounded-2xl border border-blue-200 text-[11px] text-blue-900 flex items-start gap-2">
+              <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+              <span>
+                <strong>Limpieza segura y selectiva:</strong> Tus citas activas (pendientes por confirmar y confirmadas), médicos y especialidades <strong>no se tocarán</strong>. Solo se borrarán las citas finalizadas (atendidas y/o canceladas) del período seleccionado.
+              </span>
+            </div>
+
+            {/* Step 1: Status Target Selection */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-bold text-slate-800">
+                1. ¿Qué tipo de citas finalizadas deseas limpiar?
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {[
+                  {
+                    id: 'both',
+                    label: 'Ambas',
+                    sub: 'Atendidas y Canceladas',
+                  },
+                  {
+                    id: 'atendida',
+                    label: 'Solo Atendidas',
+                    sub: 'Consultas ya realizadas',
+                  },
+                  {
+                    id: 'cancelada',
+                    label: 'Solo Canceladas',
+                    sub: 'Turnos anulados',
+                  },
+                ].map(target => (
+                  <button
+                    key={target.id}
+                    type="button"
+                    onClick={() => setPurgeStatusTarget(target.id as any)}
+                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      purgeStatusTarget === target.id
+                        ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
+                        : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
+                    }`}
+                  >
+                    <div className="text-xs font-extrabold flex items-center justify-between">
+                      <span>{target.label}</span>
+                      {purgeStatusTarget === target.id && (
+                        <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                      )}
+                    </div>
+                    <div
+                      className={`text-[10px] mt-0.5 ${
+                        purgeStatusTarget === target.id ? 'text-slate-300' : 'text-slate-500'
+                      }`}
+                    >
+                      {target.sub}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Step 2: Period Selection Options */}
+            <div className="space-y-2">
+              <label className="block text-xs font-bold text-slate-800">
+                2. Selecciona el período de antigüedad a limpiar:
+              </label>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {[
+                  {
+                    id: 'past',
+                    title: 'Anteriores a hoy',
+                    desc: 'Citas de fechas pasadas (hasta ayer)',
+                  },
+                  {
+                    id: 'older_7',
+                    title: 'Más de 7 días',
+                    desc: 'Con más de 1 semana de antigüedad',
+                  },
+                  {
+                    id: 'older_15',
+                    title: 'Más de 15 días',
+                    desc: 'Con más de 2 semanas de antigüedad',
+                  },
+                  {
+                    id: 'older_30',
+                    title: 'Más de 30 días (1 mes)',
+                    desc: 'Con más de un mes de antigüedad',
+                  },
+                  {
+                    id: 'older_90',
+                    title: 'Más de 90 días (3 meses)',
+                    desc: 'Historial antiguo de más de 3 meses',
+                  },
+                  {
+                    id: 'custom_range',
+                    title: 'Rango de fechas específico',
+                    desc: 'Elegir desde / hasta qué fecha borrar',
+                  },
+                  {
+                    id: 'all_cancelled',
+                    title: 'Todas las del estado elegido',
+                    desc: 'Sin importar la fecha registrada',
+                  },
+                ].map(opt => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setPurgePeriod(opt.id as any)}
+                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      opt.id === 'all_cancelled' ? 'sm:col-span-2' : ''
+                    } ${
+                      purgePeriod === opt.id
+                        ? 'bg-rose-50/90 border-rose-400 ring-2 ring-rose-500/20 text-rose-950'
+                        : 'bg-slate-50/70 hover:bg-slate-100 border-slate-200 text-slate-700'
+                    }`}
+                  >
+                    <div className="text-xs font-extrabold flex items-center justify-between">
+                      <span>{opt.title}</span>
+                      {purgePeriod === opt.id && (
+                        <span className="w-2 h-2 rounded-full bg-rose-600" />
+                      )}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">{opt.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Custom Date Range Pickers if custom_range is selected */}
+            {purgePeriod === 'custom_range' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 bg-slate-50 rounded-2xl border border-slate-200 animate-in fade-in">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-slate-700 block">
+                    Desde la fecha (opcional):
+                  </label>
+                  <input
+                    type="date"
+                    value={purgeFromDate}
+                    onChange={e => setPurgeFromDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-semibold text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-rose-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-slate-700 block">
+                    Hasta la fecha (inclusive):
+                  </label>
+                  <input
+                    type="date"
+                    value={purgeToDate}
+                    onChange={e => setPurgeToDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-semibold text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-rose-500"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Live Preview of matching appointments */}
+            <div className="p-3.5 rounded-2xl border border-slate-200 bg-slate-50 space-y-2">
+              <div className="flex items-center justify-between flex-wrap gap-1">
+                <span className="text-xs font-bold text-slate-700">
+                  Citas encontradas para limpiar:
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-xs font-black ${
+                      matchingCancelledToPurge.length > 0
+                        ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                        : 'bg-slate-200 text-slate-600'
+                    }`}
+                  >
+                    {matchingCancelledToPurge.length}{' '}
+                    {matchingCancelledToPurge.length === 1 ? 'cita' : 'citas'}
+                  </span>
+                </div>
+              </div>
+
+              {matchingCancelledToPurge.length > 0 ? (
+                <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1 pt-1">
+                  {matchingCancelledToPurge.map(app => (
+                    <div
+                      key={app.id}
+                      className="flex items-center justify-between gap-2 text-[11px] bg-white px-2.5 py-1.5 rounded-xl border border-slate-200/80"
+                    >
+                      <div className="truncate flex items-center gap-1.5">
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase shrink-0 ${
+                            app.status === 'atendida'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {app.status === 'atendida' ? 'Atendida' : 'Cancelada'}
+                        </span>
+                        <span className="font-mono font-bold text-slate-500">
+                          #{app.id}
+                        </span>
+                        <span className="font-bold text-slate-800 truncate">{app.patientName}</span>
+                        <span className="text-slate-400">•</span>
+                        <span className="text-slate-600 truncate">{app.doctorName}</span>
+                      </div>
+                      <span className="font-semibold text-slate-700 shrink-0">
+                        {app.date}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-500 italic">
+                  No hay citas que coincidan con el estado y período seleccionados.
+                </p>
+              )}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="pt-2 flex flex-col-reverse sm:flex-row items-center justify-end gap-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowPurgeModal(false)}
+                className="w-full sm:w-auto px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer transition-colors text-center"
+              >
+                Cerrar
+              </button>
+              <button
+                type="button"
+                id="btn-confirm-purge-cancelled"
+                disabled={matchingCancelledToPurge.length === 0 || isPurging}
+                onClick={handleConfirmPurgeCancelled}
+                className="w-full sm:w-auto px-4 py-2.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 disabled:text-slate-500 text-white shadow-md shadow-rose-600/20 disabled:shadow-none cursor-pointer disabled:cursor-not-allowed transition-all flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>
+                  {isPurging
+                    ? 'Eliminando de la Base de Datos...'
+                    : `Eliminar ${matchingCancelledToPurge.length} ${
+                        matchingCancelledToPurge.length === 1 ? 'Cita' : 'Citas'
+                      }`}
+                </span>
               </button>
             </div>
           </div>

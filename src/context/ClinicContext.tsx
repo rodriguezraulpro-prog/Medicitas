@@ -19,6 +19,7 @@ import {
   syncDeleteSpecialtyFromSupabase,
   syncSaveAppointmentToSupabase,
   syncDeleteAppointmentFromSupabase,
+  syncDeleteAppointmentsBatchFromSupabase,
   syncClearAllDataFromSupabase,
   uploadAllLocalDataToSupabase,
   SupabaseConfig,
@@ -37,6 +38,7 @@ interface ClinicContextType {
   updateAppointment: (id: string, updates: Partial<Appointment>) => void;
   cancelAppointment: (id: string, reason: string, cancelledBy: 'paciente' | 'clinica') => void;
   deleteAppointment: (id: string) => void;
+  purgeCancelledAppointments: (appointmentIds: string[]) => Promise<number>;
   addDoctor: (doctor: Omit<Doctor, 'id'>) => Doctor;
   updateDoctor: (id: string, updates: Partial<Doctor>) => void;
   deleteDoctor: (id: string) => void;
@@ -67,6 +69,7 @@ const STORAGE_KEYS = {
   SPECIALTIES: 'medicitas_specialties_v3',
   CONFIG: 'medicitas_config_v3',
   BLOCKED: 'medicitas_blocked_v3',
+  DELETED_APPOINTMENTS: 'medicitas_deleted_appointments_v3',
 };
 
 // Purge old v1/v2 demo & cached keys if present to ensure a completely clean template start
@@ -204,6 +207,11 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           setClinicConfig(JSON.parse(event.newValue));
         } else if (event.key === STORAGE_KEYS.BLOCKED) {
           setBlockedSlots(JSON.parse(event.newValue));
+        } else if (event.key === STORAGE_KEYS.DELETED_APPOINTMENTS) {
+          const parsedIds: string[] = JSON.parse(event.newValue);
+          if (Array.isArray(parsedIds)) {
+            parsedIds.forEach(id => deletedAppointmentIdsRef.current.add(id));
+          }
         }
       } catch (err) {
         console.warn('Error syncing storage event', err);
@@ -214,7 +222,27 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return () => window.removeEventListener('storage', handleStorageEvent);
   }, []);
 
-  const deletedAppointmentIdsRef = useRef<Set<string>>(new Set());
+  const deletedAppointmentIdsRef = useRef<Set<string>>((() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.DELETED_APPOINTMENTS);
+      const parsed = saved ? JSON.parse(saved) : [];
+      return new Set<string>(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      return new Set<string>();
+    }
+  })());
+
+  const persistDeletedAppointmentIds = useCallback((idsToAdd: string[]) => {
+    idsToAdd.forEach(id => deletedAppointmentIdsRef.current.add(id));
+    try {
+      localStorage.setItem(
+        STORAGE_KEYS.DELETED_APPOINTMENTS,
+        JSON.stringify(Array.from(deletedAppointmentIdsRef.current))
+      );
+    } catch {
+      // ignore storage error
+    }
+  }, []);
 
   // Fetch all data from Cloud
   const syncFromCloud = useCallback(async (silent = false): Promise<{ success: boolean; message: string }> => {
@@ -251,8 +279,22 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
       setSpecialties(data.specialties);
       setDoctors(data.doctors);
+
+      const remoteDeletedStillPresent = data.appointments.filter(a =>
+        deletedAppointmentIdsRef.current.has(a.id)
+      );
+      if (remoteDeletedStillPresent.length > 0) {
+        syncDeleteAppointmentsBatchFromSupabase(remoteDeletedStillPresent.map(a => a.id)).catch(
+          err => console.warn('Re-deleting purged appointments from cloud error:', err)
+        );
+      }
+
+      const activeRemoteAppointments = data.appointments.filter(
+        a => !deletedAppointmentIdsRef.current.has(a.id)
+      );
+
       setAppointments(prev => {
-        const remoteIds = new Set(data.appointments.map(a => a.id));
+        const remoteIds = new Set(activeRemoteAppointments.map(a => a.id));
         const unsyncedLocal = prev.filter(
           localApp =>
             !remoteIds.has(localApp.id) && !deletedAppointmentIdsRef.current.has(localApp.id)
@@ -263,9 +305,9 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
               console.warn('Auto-uploading unsynced local appointment error:', err)
             );
           });
-          return [...unsyncedLocal, ...data.appointments];
+          return [...unsyncedLocal, ...activeRemoteAppointments];
         }
-        return data.appointments;
+        return activeRemoteAppointments;
       });
       setBlockedSlots(data.blockedSlots);
 
@@ -277,7 +319,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       return {
         success: true,
-        message: `Sincronización exitosa con la Nube: ${data.doctors.length} médicos, ${data.specialties.length} especialidades, ${data.appointments.length} citas.`,
+        message: `Sincronización exitosa con la Nube: ${data.doctors.length} médicos, ${data.specialties.length} especialidades, ${activeRemoteAppointments.length} citas.`,
       };
     } catch (err: any) {
       if (!silent) {
@@ -370,8 +412,11 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       if (cloudData.clinicConfig) setClinicConfig(cloudData.clinicConfig);
       setSpecialties(cloudData.specialties);
       setDoctors(cloudData.doctors);
+      const activeRemoteAppointments = cloudData.appointments.filter(
+        a => !deletedAppointmentIdsRef.current.has(a.id)
+      );
       setAppointments(prev => {
-        const remoteIds = new Set(cloudData.appointments.map(a => a.id));
+        const remoteIds = new Set(activeRemoteAppointments.map(a => a.id));
         const unsyncedLocal = prev.filter(
           localApp =>
             !remoteIds.has(localApp.id) && !deletedAppointmentIdsRef.current.has(localApp.id)
@@ -380,9 +425,9 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           unsyncedLocal.forEach(app => {
             syncSaveAppointmentToSupabase(app).catch(() => {});
           });
-          return [...unsyncedLocal, ...cloudData.appointments];
+          return [...unsyncedLocal, ...activeRemoteAppointments];
         }
-        return cloudData.appointments;
+        return activeRemoteAppointments;
       });
       setBlockedSlots(cloudData.blockedSlots);
     } else if (hasLocalCustomData) {
@@ -589,11 +634,49 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   const deleteAppointment = (id: string) => {
-    deletedAppointmentIdsRef.current.add(id);
-    setAppointments(prev => prev.filter(app => app.id !== id));
+    persistDeletedAppointmentIds([id]);
+    setAppointments(prev => {
+      const next = prev.filter(app => app.id !== id);
+      try {
+        localStorage.setItem(STORAGE_KEYS.APPOINTMENTS, JSON.stringify(next));
+      } catch {
+        // ignore storage error
+      }
+      return next;
+    });
     syncDeleteAppointmentFromSupabase(id).catch(err =>
       console.warn('Background sync error (deleteAppointment):', err)
     );
+  };
+
+  const purgeCancelledAppointments = async (appointmentIds: string[]): Promise<number> => {
+    const validIds = new Set(
+      appointments
+        .filter(
+          app =>
+            (app.status === 'cancelada' || app.status === 'atendida') &&
+            appointmentIds.includes(app.id)
+        )
+        .map(app => app.id)
+    );
+
+    if (validIds.size === 0) return 0;
+
+    const idsList = Array.from(validIds);
+    persistDeletedAppointmentIds(idsList);
+
+    setAppointments(prev => {
+      const next = prev.filter(app => !validIds.has(app.id));
+      try {
+        localStorage.setItem(STORAGE_KEYS.APPOINTMENTS, JSON.stringify(next));
+      } catch {
+        // ignore storage error
+      }
+      return next;
+    });
+
+    await syncDeleteAppointmentsBatchFromSupabase(idsList);
+    return idsList.length;
   };
 
   const addDoctor = (doctorData: Omit<Doctor, 'id'>): Doctor => {
@@ -694,7 +777,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   const clearAllData = () => {
-    appointments.forEach(a => deletedAppointmentIdsRef.current.add(a.id));
+    persistDeletedAppointmentIds(appointments.map(a => a.id));
     setAppointments([]);
     setDoctors([]);
     setSpecialties([]);
@@ -799,6 +882,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         updateAppointment,
         cancelAppointment,
         deleteAppointment,
+        purgeCancelledAppointments,
         addDoctor,
         updateDoctor,
         deleteDoctor,

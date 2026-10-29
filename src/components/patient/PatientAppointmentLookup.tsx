@@ -444,7 +444,7 @@ export const PatientAppointmentLookup: React.FC<PatientAppointmentLookupProps> =
                   No se encontraron citas activas para la cédula: &quot;{searchedTerm}&quot;
                 </h4>
                 <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
-                  Solo se muestran citas en estado <strong className="text-slate-700">Pendiente de confirmación</strong> o <strong className="text-slate-700">Confirmadas</strong> con fecha vigente (de hoy en adelante).
+                  Solo se muestran citas en estado <strong className="text-slate-700">Pendiente por confirmar</strong> o <strong className="text-slate-700">Confirmadas</strong> con fecha vigente (de hoy en adelante).
                 </p>
                 <div className="p-2.5 bg-slate-50 rounded-xl text-[11px] text-slate-600 max-w-md mx-auto text-left mt-2 border border-slate-200 space-y-1">
                   <p className="font-semibold text-slate-700">• Si tu cita ya fue atendida por el médico, ha finalizado su ciclo.</p>
@@ -509,7 +509,7 @@ export const PatientAppointmentLookup: React.FC<PatientAppointmentLookupProps> =
                         ) : (
                           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300">
                             <Clock className="w-3.5 h-3.5 text-amber-600" />
-                            <span>Pendiente WhatsApp</span>
+                            <span>Pendiente por confirmar</span>
                           </span>
                         )}
                       </div>

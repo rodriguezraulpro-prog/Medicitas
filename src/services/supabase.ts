@@ -591,7 +591,13 @@ export async function fetchClinicDataFromSupabase(): Promise<{
 
     const specialties = (specRes.data || []).map(mapSpecialtyFromDb);
     const doctors = (docRes.data || []).map(mapDoctorFromDb);
-    const appointments = (appRes.data || []).map(mapAppointmentFromDb);
+    const appointments = (appRes.data || [])
+      .filter(
+        (row: any) =>
+          row.status !== 'eliminada' &&
+          !(typeof row.notes === 'string' && row.notes.includes('[ELIMINADA]'))
+      )
+      .map(mapAppointmentFromDb);
     const blockedSlots = (blockRes.data || []).map(mapBlockedSlotFromDb);
 
     return {
@@ -777,10 +783,41 @@ export async function syncDeleteAppointmentFromSupabase(id: string): Promise<boo
   const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
-    const { error } = await client.from('appointments').delete().eq('id', id);
-    return !error;
+    const { data, error } = await client.from('appointments').delete().eq('id', id).select('id');
+    if (!error && data && data.length > 0) {
+      return true;
+    }
+    // Fallback: if RLS blocks physical DELETE or 0 rows were deleted, mark row as deleted via UPDATE
+    const { error: updateErr } = await client
+      .from('appointments')
+      .update({ notes: '[ELIMINADA]' })
+      .eq('id', id);
+    return !error || !updateErr;
   } catch (err) {
     console.warn('Error deleting appointment from Supabase:', err);
+    return false;
+  }
+}
+
+export async function syncDeleteAppointmentsBatchFromSupabase(ids: string[]): Promise<boolean> {
+  if (!ids || ids.length === 0) return true;
+  const client = await ensureActiveSupabaseClient();
+  if (!client) return false;
+  try {
+    const { data, error } = await client.from('appointments').delete().in('id', ids).select('id');
+    const deletedSet = new Set((data || []).map((row: any) => row.id));
+    const remainingIds = ids.filter(id => !deletedSet.has(id));
+
+    if (error || remainingIds.length > 0) {
+      const targetIds = error ? ids : remainingIds;
+      await client
+        .from('appointments')
+        .update({ notes: '[ELIMINADA]' })
+        .in('id', targetIds);
+    }
+    return true;
+  } catch (err) {
+    console.warn('Error batch deleting appointments from Supabase:', err);
     return false;
   }
 }

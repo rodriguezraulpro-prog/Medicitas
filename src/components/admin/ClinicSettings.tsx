@@ -30,6 +30,7 @@ export const ClinicSettings: React.FC = () => {
     clinicConfig,
     updateClinicConfig,
     clearAllData,
+    purgeCancelledAppointments,
     doctors,
     specialties,
     appointments,
@@ -53,6 +54,58 @@ export const ClinicSettings: React.FC = () => {
 
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+  // Selective attended & cancelled appointments cleanup state
+  const [cleanupStatusTarget, setCleanupStatusTarget] = useState<'both' | 'cancelada' | 'atendida'>('both');
+  const [cleanupPeriod, setCleanupPeriod] = useState<
+    'past' | 'older_7' | 'older_15' | 'older_30' | 'older_90' | 'all_cancelled'
+  >('past');
+  const [isCleaningCancelled, setIsCleaningCancelled] = useState(false);
+  const [cleanupSuccessMessage, setCleanupSuccessMessage] = useState<string | null>(null);
+
+  const todayStr = new Date().toISOString().split('T')[0];
+  const matchingCancelledIds = appointments
+    .filter(app => {
+      if (cleanupStatusTarget === 'both') {
+        if (app.status !== 'cancelada' && app.status !== 'atendida') return false;
+      } else if (cleanupStatusTarget === 'cancelada') {
+        if (app.status !== 'cancelada') return false;
+      } else if (cleanupStatusTarget === 'atendida') {
+        if (app.status !== 'atendida') return false;
+      }
+
+      if (cleanupPeriod === 'all_cancelled') return true;
+      if (cleanupPeriod === 'past') return app.date < todayStr;
+      const days =
+        cleanupPeriod === 'older_7'
+          ? 7
+          : cleanupPeriod === 'older_15'
+          ? 15
+          : cleanupPeriod === 'older_30'
+          ? 30
+          : 90;
+      const d = new Date();
+      d.setDate(d.getDate() - days);
+      const cutoff = d.toISOString().split('T')[0];
+      return app.date <= cutoff;
+    })
+    .map(a => a.id);
+
+  const handleSelectivePurgeCancelled = async () => {
+    if (matchingCancelledIds.length === 0) return;
+    setIsCleaningCancelled(true);
+    try {
+      const deleted = await purgeCancelledAppointments(matchingCancelledIds);
+      setCleanupSuccessMessage(
+        `¡Limpieza completada! Se eliminaron ${deleted} ${
+          deleted === 1 ? 'cita finalizada' : 'citas finalizadas'
+        } de la base de datos.`
+      );
+      setTimeout(() => setCleanupSuccessMessage(null), 5000);
+    } finally {
+      setIsCleaningCancelled(false);
+    }
+  };
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -437,6 +490,86 @@ export const ClinicSettings: React.FC = () => {
           </button>
         </div>
       </form>
+
+      {/* Selective Maintenance: Limpiar Citas Atendidas y Canceladas Antiguas */}
+      <div className="bg-amber-50/70 border border-amber-200 rounded-3xl p-5 sm:p-6 space-y-4">
+        <div className="flex items-start gap-3.5">
+          <div className="w-11 h-11 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 shadow-2xs border border-amber-200">
+            <Trash2 className="w-5 h-5" />
+          </div>
+          <div className="space-y-1 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h4 className="text-sm sm:text-base font-extrabold text-slate-900">
+                Mantenimiento: Limpiar Citas Atendidas y Canceladas por Período
+              </h4>
+              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-amber-200 text-amber-950 uppercase tracking-wider">
+                Limpieza Selectiva
+              </span>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Elimina de la base de datos las citas con estado <strong>Atendida</strong> y/o <strong>Cancelada</strong> del período que selecciones. Tus médicos, especialidades y citas activas (pendientes o confirmadas) se mantienen intactos.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 pt-3 border-t border-amber-200/80">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 flex-1">
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-slate-700">
+                Estado a limpiar:
+              </label>
+              <select
+                value={cleanupStatusTarget}
+                onChange={e => setCleanupStatusTarget(e.target.value as any)}
+                className="px-3 py-2 rounded-xl bg-white border border-amber-300 text-xs font-semibold text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-amber-500 cursor-pointer"
+              >
+                <option value="both">Ambas (Citas Atendidas y Canceladas)</option>
+                <option value="atendida">Solo Citas Ya Atendidas</option>
+                <option value="cancelada">Solo Citas Canceladas</option>
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-slate-700">
+                Período de antigüedad:
+              </label>
+              <select
+                value={cleanupPeriod}
+                onChange={e => setCleanupPeriod(e.target.value as any)}
+                className="px-3 py-2 rounded-xl bg-white border border-amber-300 text-xs font-semibold text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-amber-500 cursor-pointer"
+              >
+                <option value="past">Anteriores a hoy (fechas pasadas)</option>
+                <option value="older_7">Más de 7 días de antigüedad</option>
+                <option value="older_15">Más de 15 días de antigüedad</option>
+                <option value="older_30">Más de 30 días (1 mes)</option>
+                <option value="older_90">Más de 90 días (3 meses)</option>
+                <option value="all_cancelled">Todas (cualquier fecha)</option>
+              </select>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={matchingCancelledIds.length === 0 || isCleaningCancelled}
+            onClick={handleSelectivePurgeCancelled}
+            className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-bold transition-all shadow-xs disabled:shadow-none flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed shrink-0 lg:self-end"
+          >
+            <Trash2 className="w-4 h-4" />
+            <span>
+              {isCleaningCancelled
+                ? 'Limpiando...'
+                : `Limpiar Registros (${matchingCancelledIds.length})`}
+            </span>
+          </button>
+        </div>
+
+        {cleanupSuccessMessage && (
+          <div className="p-3 rounded-xl bg-emerald-100 border border-emerald-200 text-emerald-900 text-xs font-bold flex items-center gap-2 animate-in fade-in">
+            <Check className="w-4 h-4 text-emerald-700 shrink-0" />
+            <span>{cleanupSuccessMessage}</span>
+          </div>
+        )}
+      </div>
 
       {/* Danger Zone: Restablecimiento del Sistema */}
       <div className="bg-rose-50/70 border-2 border-rose-200 rounded-3xl p-5 sm:p-6 space-y-4">
