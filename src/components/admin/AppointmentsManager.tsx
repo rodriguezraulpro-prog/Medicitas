@@ -73,7 +73,9 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     specialties,
     syncFromCloud,
     isCloudSyncing,
+    rlsDeleteBlocked,
   } = useClinic();
+  const [copiedRlsSql, setCopiedRlsSql] = useState(false);
 
   // Refresh appointments from Cloud whenever the admin opens the Appointments tab
   useEffect(() => {
@@ -535,6 +537,37 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
           >
             ✕
           </button>
+        </div>
+      )}
+
+      {/* Warning Banner if Supabase RLS Policy blocks physical DELETE */}
+      {rlsDeleteBlocked && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-950 p-4 rounded-2xl text-xs space-y-2 shadow-2xs animate-in fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-amber-900">
+                  Permiso de borrado físico bloqueado por política RLS en Supabase
+                </p>
+                <p className="text-amber-800 mt-0.5">
+                  Tu tabla <code className="font-mono bg-amber-100 px-1 rounded">appointments</code> en Supabase tiene una política RLS que impide el comando <code className="font-mono bg-amber-100 px-1 rounded">DELETE</code>. Copia y ejecuta este comando en el <strong>SQL Editor</strong> de Supabase para habilitar el borrado definitivo:
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const sql = `DROP POLICY IF EXISTS "Anon public access to appointments" ON public.appointments;\nCREATE POLICY "Anon public access to appointments" ON public.appointments FOR ALL TO public, anon, authenticated USING (true) WITH CHECK (true);\nGRANT ALL ON TABLE public.appointments TO anon, authenticated, service_role;\nDELETE FROM public.appointments WHERE notes LIKE '%[ELIMINADA]%';`;
+                navigator.clipboard.writeText(sql);
+                setCopiedRlsSql(true);
+                setTimeout(() => setCopiedRlsSql(false), 3000);
+              }}
+              className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shrink-0 cursor-pointer transition"
+            >
+              {copiedRlsSql ? '¡SQL Copiado!' : 'Copiar SQL de Solución'}
+            </button>
+          </div>
         </div>
       )}
 

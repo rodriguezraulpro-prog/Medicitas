@@ -22,6 +22,7 @@ import {
   syncDeleteAppointmentsBatchFromSupabase,
   syncClearAllDataFromSupabase,
   uploadAllLocalDataToSupabase,
+  isRlsDeleteBlocked,
   SupabaseConfig,
 } from '../services/supabase';
 
@@ -57,6 +58,7 @@ interface ClinicContextType {
   isCloudSyncing: boolean;
   cloudError: string | null;
   lastCloudSync: Date | null;
+  rlsDeleteBlocked: boolean;
   supabaseConfig: SupabaseConfig;
   setCloudConfig: (config: SupabaseConfig) => Promise<{ success: boolean; message: string }>;
   syncFromCloud: (silent?: boolean) => Promise<{ success: boolean; message: string }>;
@@ -150,6 +152,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
   const [lastCloudSync, setLastCloudSync] = useState<Date | null>(null);
+  const [rlsDeleteBlocked, setRlsDeleteBlocked] = useState<boolean>(false);
 
   // Sync state to local storage as continuous fallback
   useEffect(() => {
@@ -232,8 +235,13 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   })());
 
+  const pendingUploadAppointmentIdsRef = useRef<Set<string>>(new Set());
+
   const persistDeletedAppointmentIds = useCallback((idsToAdd: string[]) => {
-    idsToAdd.forEach(id => deletedAppointmentIdsRef.current.add(id));
+    idsToAdd.forEach(id => {
+      deletedAppointmentIdsRef.current.add(id);
+      pendingUploadAppointmentIdsRef.current.delete(id);
+    });
     try {
       localStorage.setItem(
         STORAGE_KEYS.DELETED_APPOINTMENTS,
@@ -267,6 +275,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         return { success: false, message: 'No se pudo obtener respuesta de la Nube.' };
       }
 
+      setRlsDeleteBlocked(Boolean(data.rlsDeleteBlocked || isRlsDeleteBlocked()));
+
       if (data.clinicConfig) {
         const normalizedConfig = {
           ...data.clinicConfig,
@@ -280,31 +290,20 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setSpecialties(data.specialties);
       setDoctors(data.doctors);
 
-      const remoteDeletedStillPresent = data.appointments.filter(a =>
-        deletedAppointmentIdsRef.current.has(a.id)
-      );
-      if (remoteDeletedStillPresent.length > 0) {
-        syncDeleteAppointmentsBatchFromSupabase(remoteDeletedStillPresent.map(a => a.id)).catch(
-          err => console.warn('Re-deleting purged appointments from cloud error:', err)
-        );
-      }
-
       const activeRemoteAppointments = data.appointments.filter(
         a => !deletedAppointmentIdsRef.current.has(a.id)
       );
 
       setAppointments(prev => {
         const remoteIds = new Set(activeRemoteAppointments.map(a => a.id));
+        // Only keep local appointments that were just created in this session and are still uploading for the first time
         const unsyncedLocal = prev.filter(
           localApp =>
-            !remoteIds.has(localApp.id) && !deletedAppointmentIdsRef.current.has(localApp.id)
+            pendingUploadAppointmentIdsRef.current.has(localApp.id) &&
+            !remoteIds.has(localApp.id) &&
+            !deletedAppointmentIdsRef.current.has(localApp.id)
         );
         if (unsyncedLocal.length > 0) {
-          unsyncedLocal.forEach(app => {
-            syncSaveAppointmentToSupabase(app).catch(err =>
-              console.warn('Auto-uploading unsynced local appointment error:', err)
-            );
-          });
           return [...unsyncedLocal, ...activeRemoteAppointments];
         }
         return activeRemoteAppointments;
@@ -419,12 +418,11 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const remoteIds = new Set(activeRemoteAppointments.map(a => a.id));
         const unsyncedLocal = prev.filter(
           localApp =>
-            !remoteIds.has(localApp.id) && !deletedAppointmentIdsRef.current.has(localApp.id)
+            pendingUploadAppointmentIdsRef.current.has(localApp.id) &&
+            !remoteIds.has(localApp.id) &&
+            !deletedAppointmentIdsRef.current.has(localApp.id)
         );
         if (unsyncedLocal.length > 0) {
-          unsyncedLocal.forEach(app => {
-            syncSaveAppointmentToSupabase(app).catch(() => {});
-          });
           return [...unsyncedLocal, ...activeRemoteAppointments];
         }
         return activeRemoteAppointments;
@@ -545,6 +543,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       createdAt: new Date().toISOString(),
     };
 
+    pendingUploadAppointmentIdsRef.current.add(id);
+
     setAppointments(prev => {
       const next = [newAppointment, ...prev];
       try {
@@ -555,9 +555,13 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return next;
     });
 
-    syncSaveAppointmentToSupabase(newAppointment).catch(err =>
-      console.warn('Background sync error (addAppointment):', err)
-    );
+    syncSaveAppointmentToSupabase(newAppointment)
+      .then(() => {
+        pendingUploadAppointmentIdsRef.current.delete(id);
+      })
+      .catch(err => {
+        console.warn('Background sync error (addAppointment):', err);
+      });
 
     return newAppointment;
   };
@@ -573,7 +577,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       const next = prev.map(app => (app.id === id ? { ...app, status } : app));
       const target = next.find(app => app.id === id);
-      if (target) {
+      if (target && !deletedAppointmentIdsRef.current.has(id)) {
         syncSaveAppointmentToSupabase(target).catch(err =>
           console.warn('Background sync error (updateAppointmentStatus):', err)
         );
@@ -593,7 +597,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       const next = prev.map(app => (app.id === id ? { ...app, ...updates } : app));
       const target = next.find(app => app.id === id);
-      if (target) {
+      if (target && !deletedAppointmentIdsRef.current.has(id)) {
         syncSaveAppointmentToSupabase(target).catch(err =>
           console.warn('Background sync error (updateAppointment):', err)
         );
@@ -624,7 +628,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       });
 
       const target = next.find(app => app.id === id);
-      if (target) {
+      if (target && !deletedAppointmentIdsRef.current.has(id)) {
         syncSaveAppointmentToSupabase(target).catch(err =>
           console.warn('Background sync error (cancelAppointment):', err)
         );
@@ -644,9 +648,11 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
       return next;
     });
-    syncDeleteAppointmentFromSupabase(id).catch(err =>
-      console.warn('Background sync error (deleteAppointment):', err)
-    );
+    syncDeleteAppointmentFromSupabase(id)
+      .then(() => {
+        setRlsDeleteBlocked(isRlsDeleteBlocked());
+      })
+      .catch(err => console.warn('Background sync error (deleteAppointment):', err));
   };
 
   const purgeCancelledAppointments = async (appointmentIds: string[]): Promise<number> => {
@@ -676,6 +682,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     await syncDeleteAppointmentsBatchFromSupabase(idsList);
+    setRlsDeleteBlocked(isRlsDeleteBlocked());
     return idsList.length;
   };
 
@@ -899,6 +906,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         isCloudSyncing,
         cloudError,
         lastCloudSync,
+        rlsDeleteBlocked,
         supabaseConfig,
         setCloudConfig,
         syncFromCloud,

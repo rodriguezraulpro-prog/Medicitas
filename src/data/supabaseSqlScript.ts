@@ -116,10 +116,18 @@ DROP POLICY IF EXISTS "Anon public access to doctors" ON public.doctors;
 CREATE POLICY "Anon public access to doctors" ON public.doctors FOR ALL USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Anon public access to appointments" ON public.appointments;
-CREATE POLICY "Anon public access to appointments" ON public.appointments FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Anon public access to appointments" ON public.appointments FOR ALL TO public, anon, authenticated USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Anon public access to blocked_slots" ON public.blocked_slots;
-CREATE POLICY "Anon public access to blocked_slots" ON public.blocked_slots FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Anon public access to blocked_slots" ON public.blocked_slots FOR ALL TO public, anon, authenticated USING (true) WITH CHECK (true);
+
+GRANT ALL ON TABLE public.clinic_config TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.specialties TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.doctors TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.appointments TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.blocked_slots TO anon, authenticated, service_role;
+
+DELETE FROM public.appointments WHERE notes LIKE '%[ELIMINADA]%';
 
 -- Habilitar Realtime para citas
 ALTER PUBLICATION supabase_realtime ADD TABLE public.appointments;

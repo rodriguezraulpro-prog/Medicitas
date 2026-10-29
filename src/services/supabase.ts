@@ -258,6 +258,48 @@ export async function saveServerSupabaseConfig(config: SupabaseConfig): Promise<
   };
 }
 
+const DELETED_APPOINTMENTS_STORAGE_KEY = 'medicitas_deleted_appointments_v3';
+const sessionDeletedAppointmentIds = new Set<string>();
+let lastKnownRlsDeleteBlocked = false;
+
+export function getDeletedAppointmentIdsSet(): Set<string> {
+  const combined = new Set<string>(sessionDeletedAppointmentIds);
+  try {
+    const raw = localStorage.getItem(DELETED_APPOINTMENTS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        parsed.forEach(id => {
+          if (typeof id === 'string') combined.add(id);
+        });
+      }
+    }
+  } catch {
+    // Ignore storage error
+  }
+  return combined;
+}
+
+export function markAppointmentsDeletedLocally(ids: string[]): void {
+  if (!ids || ids.length === 0) return;
+  const current = getDeletedAppointmentIdsSet();
+  ids.forEach(id => {
+    if (id) {
+      sessionDeletedAppointmentIds.add(id);
+      current.add(id);
+    }
+  });
+  try {
+    localStorage.setItem(DELETED_APPOINTMENTS_STORAGE_KEY, JSON.stringify(Array.from(current)));
+  } catch {
+    // Ignore storage error
+  }
+}
+
+export function isRlsDeleteBlocked(): boolean {
+  return lastKnownRlsDeleteBlocked;
+}
+
 function createResilientSupabaseClient(url: string, anonKey: string): SupabaseClient {
   return createClient(url, anonKey, {
     auth: {
@@ -266,9 +308,8 @@ function createResilientSupabaseClient(url: string, anonKey: string): SupabaseCl
     global: {
       fetch: (input: RequestInfo | URL, init?: RequestInit) => {
         const method = (init?.method || 'GET').toUpperCase();
-        const isWrite = method === 'POST' || method === 'PATCH' || method === 'PUT' || method === 'DELETE';
         const bodyLength = typeof init?.body === 'string' ? init.body.length : 0;
-        if (isWrite && bodyLength < 60000) {
+        if (method === 'POST' && bodyLength < 60000) {
           return fetch(input, { ...init, keepalive: true });
         }
         return fetch(input, init);
@@ -561,6 +602,7 @@ export async function fetchClinicDataFromSupabase(): Promise<{
   specialties: Specialty[];
   appointments: Appointment[];
   blockedSlots: BlockedSlot[];
+  rlsDeleteBlocked?: boolean;
 } | null> {
   const client = await ensureActiveSupabaseClient();
   if (!client) return null;
@@ -589,13 +631,40 @@ export async function fetchClinicDataFromSupabase(): Promise<{
       config = mapConfigFromDb(cfgRes.data);
     }
 
+    const deletedSet = getDeletedAppointmentIdsSet();
+    const rawRows: any[] = appRes.data || [];
+
+    // Identify any rows in Supabase that were marked [ELIMINADA] or deleted locally and physically remove them from Supabase
+    const rowsToPurgePhysically = rawRows.filter(
+      (row: any) =>
+        row.status === 'eliminada' ||
+        (typeof row.notes === 'string' && row.notes.includes('[ELIMINADA]')) ||
+        deletedSet.has(row.id)
+    );
+
+    if (rowsToPurgePhysically.length > 0) {
+      const purgeIds = rowsToPurgePhysically.map((row: any) => String(row.id));
+      markAppointmentsDeletedLocally(purgeIds);
+      const { error: delErr } = await client.from('appointments').delete().in('id', purgeIds);
+      if (!delErr) {
+        const { data: verifyRemaining } = await client
+          .from('appointments')
+          .select('id')
+          .in('id', purgeIds);
+        lastKnownRlsDeleteBlocked = Boolean(verifyRemaining && verifyRemaining.length > 0);
+      } else {
+        lastKnownRlsDeleteBlocked = true;
+      }
+    }
+
     const specialties = (specRes.data || []).map(mapSpecialtyFromDb);
     const doctors = (docRes.data || []).map(mapDoctorFromDb);
-    const appointments = (appRes.data || [])
+    const appointments = rawRows
       .filter(
         (row: any) =>
           row.status !== 'eliminada' &&
-          !(typeof row.notes === 'string' && row.notes.includes('[ELIMINADA]'))
+          !(typeof row.notes === 'string' && row.notes.includes('[ELIMINADA]')) &&
+          !deletedSet.has(row.id)
       )
       .map(mapAppointmentFromDb);
     const blockedSlots = (blockRes.data || []).map(mapBlockedSlotFromDb);
@@ -606,6 +675,7 @@ export async function fetchClinicDataFromSupabase(): Promise<{
       specialties,
       appointments,
       blockedSlots,
+      rlsDeleteBlocked: lastKnownRlsDeleteBlocked,
     };
   } catch (err) {
     console.warn('Error fetching data from Supabase:', err);
@@ -696,6 +766,14 @@ export async function syncDeleteSpecialtyFromSupabase(id: string): Promise<boole
 }
 
 export async function syncSaveAppointmentToSupabase(appointment: Appointment): Promise<boolean> {
+  if (!appointment || !appointment.id) return false;
+  if (
+    getDeletedAppointmentIdsSet().has(appointment.id) ||
+    (typeof appointment.notes === 'string' && appointment.notes.includes('[ELIMINADA]'))
+  ) {
+    return false;
+  }
+
   const client = await ensureActiveSupabaseClient();
   if (!client) return false;
 
@@ -703,8 +781,17 @@ export async function syncSaveAppointmentToSupabase(appointment: Appointment): P
     const currentPayload: Record<string, any> = { ...mapAppointmentToDb(appointment, true) };
 
     for (let attempt = 0; attempt < 5; attempt++) {
+      if (getDeletedAppointmentIdsSet().has(appointment.id)) {
+        return false;
+      }
+
       const { error } = await client.from('appointments').upsert(currentPayload);
       if (!error) {
+        // If deleted while upsert was in-flight, immediately delete it from Supabase
+        if (getDeletedAppointmentIdsSet().has(appointment.id)) {
+          await client.from('appointments').delete().eq('id', appointment.id);
+          return false;
+        }
         return true;
       }
 
@@ -780,19 +867,28 @@ export async function syncSaveAppointmentToSupabase(appointment: Appointment): P
 }
 
 export async function syncDeleteAppointmentFromSupabase(id: string): Promise<boolean> {
+  if (!id) return false;
+  markAppointmentsDeletedLocally([id]);
+
   const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
-    const { data, error } = await client.from('appointments').delete().eq('id', id).select('id');
-    if (!error && data && data.length > 0) {
-      return true;
-    }
-    // Fallback: if RLS blocks physical DELETE or 0 rows were deleted, mark row as deleted via UPDATE
-    const { error: updateErr } = await client
+    const { error } = await client.from('appointments').delete().eq('id', id);
+    // Also clean up any legacy rows marked [ELIMINADA]
+    await client.from('appointments').delete().ilike('notes', '%[ELIMINADA]%');
+
+    const { data: verifyRemaining } = await client
       .from('appointments')
-      .update({ notes: '[ELIMINADA]' })
+      .select('id')
       .eq('id', id);
-    return !error || !updateErr;
+
+    if (verifyRemaining && verifyRemaining.length > 0) {
+      lastKnownRlsDeleteBlocked = true;
+      return false;
+    }
+
+    lastKnownRlsDeleteBlocked = false;
+    return !error;
   } catch (err) {
     console.warn('Error deleting appointment from Supabase:', err);
     return false;
@@ -801,21 +897,26 @@ export async function syncDeleteAppointmentFromSupabase(id: string): Promise<boo
 
 export async function syncDeleteAppointmentsBatchFromSupabase(ids: string[]): Promise<boolean> {
   if (!ids || ids.length === 0) return true;
+  markAppointmentsDeletedLocally(ids);
+
   const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
-    const { data, error } = await client.from('appointments').delete().in('id', ids).select('id');
-    const deletedSet = new Set((data || []).map((row: any) => row.id));
-    const remainingIds = ids.filter(id => !deletedSet.has(id));
+    const { error } = await client.from('appointments').delete().in('id', ids);
+    await client.from('appointments').delete().ilike('notes', '%[ELIMINADA]%');
 
-    if (error || remainingIds.length > 0) {
-      const targetIds = error ? ids : remainingIds;
-      await client
-        .from('appointments')
-        .update({ notes: '[ELIMINADA]' })
-        .in('id', targetIds);
+    const { data: verifyRemaining } = await client
+      .from('appointments')
+      .select('id')
+      .in('id', ids);
+
+    if (verifyRemaining && verifyRemaining.length > 0) {
+      lastKnownRlsDeleteBlocked = true;
+      return false;
     }
-    return true;
+
+    lastKnownRlsDeleteBlocked = false;
+    return !error;
   } catch (err) {
     console.warn('Error batch deleting appointments from Supabase:', err);
     return false;
