@@ -6,7 +6,7 @@ let memoryConfig = null;
 
 function getCacheKey(requestUrl) {
   const url = new URL(requestUrl);
-  return new Request(`${url.origin}/__medicitas_edge_cloud_config_v3__`, {
+  return new Request(`${url.origin}/__medicitas_edge_cloud_config_v4__`, {
     method: 'GET',
   });
 }

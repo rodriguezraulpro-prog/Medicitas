@@ -7,7 +7,7 @@ export interface SupabaseConfig {
   anonKey: string;
 }
 
-const SUPABASE_STORAGE_KEY = 'medicitas_cloud_config_v3';
+const SUPABASE_STORAGE_KEY = 'medicitas_cloud_config_v4';
 
 let memoryStoredConfig: SupabaseConfig | null = null;
 let activeClient: SupabaseClient | null = null;
@@ -16,6 +16,10 @@ let activeClient: SupabaseClient | null = null;
 try {
   localStorage.removeItem('medicitas_supabase_config');
   localStorage.removeItem('medicitas_cloud_config_v2');
+  localStorage.removeItem('medicitas_cloud_config_v3');
+  localStorage.removeItem('medicitas_saved_cloud_credentials_v3');
+  localStorage.removeItem('medicitas_manual_offline_v3');
+  sessionStorage.removeItem('medicitas_db_dev_unlocked');
 } catch {
   // Ignore error
 }

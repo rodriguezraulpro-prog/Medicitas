@@ -70,17 +70,17 @@ interface ClinicContextType {
 }
 
 const STORAGE_KEYS = {
-  APPOINTMENTS: 'medicitas_appointments_v3',
-  DOCTORS: 'medicitas_doctors_v3',
-  SPECIALTIES: 'medicitas_specialties_v3',
-  CONFIG: 'medicitas_config_v3',
-  BLOCKED: 'medicitas_blocked_v3',
-  DELETED_APPOINTMENTS: 'medicitas_deleted_appointments_v3',
-  MANUAL_OFFLINE: 'medicitas_manual_offline_v3',
-  SAVED_CLOUD_CREDENTIALS: 'medicitas_saved_cloud_credentials_v3',
+  APPOINTMENTS: 'medicitas_appointments_v4',
+  DOCTORS: 'medicitas_doctors_v4',
+  SPECIALTIES: 'medicitas_specialties_v4',
+  CONFIG: 'medicitas_config_v4',
+  BLOCKED: 'medicitas_blocked_v4',
+  DELETED_APPOINTMENTS: 'medicitas_deleted_appointments_v4',
+  MANUAL_OFFLINE: 'medicitas_manual_offline_v4',
+  SAVED_CLOUD_CREDENTIALS: 'medicitas_saved_cloud_credentials_v4',
 };
 
-// Purge old v1/v2 demo & cached keys if present to ensure a completely clean template start
+// Purge old v1/v2/v3 demo & cached keys if present to ensure a completely clean template start
 try {
   localStorage.removeItem('medicitas_appointments_v1');
   localStorage.removeItem('medicitas_doctors_v1');
@@ -92,7 +92,18 @@ try {
   localStorage.removeItem('medicitas_specialties_v2');
   localStorage.removeItem('medicitas_config_v2');
   localStorage.removeItem('medicitas_blocked_v2');
+  localStorage.removeItem('medicitas_appointments_v3');
+  localStorage.removeItem('medicitas_doctors_v3');
+  localStorage.removeItem('medicitas_specialties_v3');
+  localStorage.removeItem('medicitas_config_v3');
+  localStorage.removeItem('medicitas_blocked_v3');
+  localStorage.removeItem('medicitas_deleted_appointments_v3');
+  localStorage.removeItem('medicitas_manual_offline_v3');
+  localStorage.removeItem('medicitas_saved_cloud_credentials_v3');
   localStorage.removeItem('medicitas_supabase_config');
+  localStorage.removeItem('medicitas_cloud_config_v2');
+  localStorage.removeItem('medicitas_cloud_config_v3');
+  sessionStorage.removeItem('medicitas_db_dev_unlocked');
 } catch {
   // ignore
 }

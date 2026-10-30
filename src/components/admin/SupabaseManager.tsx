@@ -54,12 +54,14 @@ export const SupabaseManager: React.FC<SupabaseManagerProps> = ({
     appointments,
   } = useClinic();
 
+  // Always start locked by default so the database panel is protected on every visit
   const [hasDevPermission, setHasDevPermission] = useState<boolean>(() => {
     try {
-      return sessionStorage.getItem('medicitas_db_dev_unlocked') === 'true';
+      sessionStorage.removeItem('medicitas_db_dev_unlocked');
     } catch {
-      return false;
+      // ignore
     }
+    return false;
   });
   const [copiedEmail, setCopiedEmail] = useState(false);
 
@@ -267,11 +269,6 @@ export const SupabaseManager: React.FC<SupabaseManagerProps> = ({
                 id="btn-db-warning-continue"
                 onClick={() => {
                   setHasDevPermission(true);
-                  try {
-                    sessionStorage.setItem('medicitas_db_dev_unlocked', 'true');
-                  } catch (e) {
-                    console.warn(e);
-                  }
                 }}
                 className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-black shadow-md shadow-amber-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
