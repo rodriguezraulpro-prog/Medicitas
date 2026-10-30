@@ -152,8 +152,15 @@ export function saveStoredSupabaseConfig(config: SupabaseConfig): void {
   }
 
   const normalized = { url: cleanUrl, anonKey: cleanKey };
+  const isUnchanged =
+    memoryStoredConfig &&
+    memoryStoredConfig.url === normalized.url &&
+    memoryStoredConfig.anonKey === normalized.anonKey;
+
   memoryStoredConfig = normalized;
-  activeClient = null;
+  if (!isUnchanged) {
+    activeClient = null;
+  }
 
   try {
     localStorage.setItem(SUPABASE_STORAGE_KEY, JSON.stringify(normalized));
@@ -309,7 +316,7 @@ function createResilientSupabaseClient(url: string, anonKey: string): SupabaseCl
       fetch: (input: RequestInfo | URL, init?: RequestInit) => {
         const method = (init?.method || 'GET').toUpperCase();
         const bodyLength = typeof init?.body === 'string' ? init.body.length : 0;
-        if (method === 'POST' && bodyLength < 60000) {
+        if ((method === 'DELETE' || method === 'POST' || method === 'PATCH') && bodyLength < 60000) {
           return fetch(input, { ...init, keepalive: true });
         }
         return fetch(input, init);
@@ -319,15 +326,25 @@ function createResilientSupabaseClient(url: string, anonKey: string): SupabaseCl
 }
 
 export function setSupabaseClientConfig(config: SupabaseConfig | null): void {
-  activeClient = null;
-  if (config && isValidConfig(config.url, config.anonKey)) {
-    const normalized = { url: config.url.trim(), anonKey: config.anonKey.trim() };
-    memoryStoredConfig = normalized;
-    try {
-      activeClient = createResilientSupabaseClient(normalized.url, normalized.anonKey);
-    } catch (err) {
-      console.warn('Failed to set Supabase client config:', err);
-    }
+  if (!config || !isValidConfig(config.url, config.anonKey)) {
+    activeClient = null;
+    memoryStoredConfig = null;
+    return;
+  }
+  const normalized = { url: config.url.trim(), anonKey: config.anonKey.trim() };
+  if (
+    activeClient &&
+    memoryStoredConfig &&
+    memoryStoredConfig.url === normalized.url &&
+    memoryStoredConfig.anonKey === normalized.anonKey
+  ) {
+    return;
+  }
+  memoryStoredConfig = normalized;
+  try {
+    activeClient = createResilientSupabaseClient(normalized.url, normalized.anonKey);
+  } catch (err) {
+    console.warn('Failed to set Supabase client config:', err);
   }
 }
 
@@ -525,7 +542,10 @@ function mapAppointmentFromDb(row: any): Appointment {
   };
 }
 
-export function mapAppointmentToDb(app: Appointment, includeCancellationCols = true): any {
+const unsupportedAppointmentCols = new Set<string>();
+const inFlightAppointmentSaves = new Map<string, Promise<boolean>>();
+
+export function mapAppointmentToDb(app: Appointment, includeCancellationCols = false): any {
   const data: any = {
     id: app.id,
     patient_name: app.patientName,
@@ -547,11 +567,19 @@ export function mapAppointmentToDb(app: Appointment, includeCancellationCols = t
     notes: app.notes || null,
   };
 
+  if (unsupportedAppointmentCols.has('patient_dni')) {
+    delete data.patient_dni;
+  }
+
   const hasCancellationData = Boolean(
     app.status === 'cancelada' || app.cancellationReason || app.cancelledBy || app.cancelledAt
   );
 
-  if (includeCancellationCols && hasCancellationData) {
+  if (
+    includeCancellationCols &&
+    hasCancellationData &&
+    !unsupportedAppointmentCols.has('cancellation_reason')
+  ) {
     data.cancellation_reason = app.cancellationReason || null;
     data.cancelled_by = app.cancelledBy || null;
     data.cancelled_at = app.cancelledAt || null;
@@ -774,95 +802,111 @@ export async function syncSaveAppointmentToSupabase(appointment: Appointment): P
     return false;
   }
 
-  const client = await ensureActiveSupabaseClient();
-  if (!client) return false;
+  const saveTask = (async (): Promise<boolean> => {
+    const client = await ensureActiveSupabaseClient();
+    if (!client) return false;
 
-  try {
-    const currentPayload: Record<string, any> = { ...mapAppointmentToDb(appointment, true) };
+    try {
+      // Do not include optional cancellation columns by default because notes already stores cancellation metadata
+      // and older Supabase tables without those columns would otherwise fail attempt 0 with HTTP 400 (PGRST204)
+      const currentPayload: Record<string, any> = { ...mapAppointmentToDb(appointment, false) };
 
-    for (let attempt = 0; attempt < 5; attempt++) {
-      if (getDeletedAppointmentIdsSet().has(appointment.id)) {
-        return false;
-      }
-
-      const { error } = await client.from('appointments').upsert(currentPayload);
-      if (!error) {
-        // If deleted while upsert was in-flight, immediately delete it from Supabase
+      for (let attempt = 0; attempt < 4; attempt++) {
         if (getDeletedAppointmentIdsSet().has(appointment.id)) {
-          await client.from('appointments').delete().eq('id', appointment.id);
           return false;
         }
-        return true;
-      }
 
-      const errCode = String(error.code || '');
-      const errMsg = String(error.message || '');
-      const errDetails = String(error.details || '');
-      const combinedMsg = `${errMsg} ${errDetails}`;
+        const { error } = await client.from('appointments').upsert(currentPayload);
+        if (!error) {
+          // If deleted while upsert was in-flight, immediately delete it from Supabase
+          if (getDeletedAppointmentIdsSet().has(appointment.id)) {
+            await client.from('appointments').delete().eq('id', appointment.id);
+            return false;
+          }
+          return true;
+        }
 
-      // 1. Handle missing column errors (PostgREST PGRST204 or PostgreSQL 42703)
-      const isColumnError =
-        errCode === 'PGRST204' ||
-        errCode === '42703' ||
-        /column|schema cache/i.test(combinedMsg);
+        const errCode = String(error.code || '');
+        const errMsg = String(error.message || '');
+        const errDetails = String(error.details || '');
+        const combinedMsg = `${errMsg} ${errDetails}`;
 
-      if (isColumnError) {
-        let removedAny = false;
+        // 1. Handle missing column errors (PostgREST PGRST204 or PostgreSQL 42703)
+        const isColumnError =
+          errCode === 'PGRST204' ||
+          errCode === '42703' ||
+          /column|schema cache/i.test(combinedMsg);
 
-        // Extract specific offending column name if mentioned in error message
-        const colMatch =
-          combinedMsg.match(/['"]([a-zA-Z0-9_]+)['"]\s+column/i) ||
-          combinedMsg.match(/column\s+['"]([a-zA-Z0-9_]+)['"]/i);
+        if (isColumnError) {
+          let removedAny = false;
 
-        if (colMatch) {
-          const offendingCol = colMatch[1] || colMatch[2];
-          if (offendingCol && offendingCol in currentPayload && offendingCol !== 'id') {
-            delete currentPayload[offendingCol];
+          const colMatch =
+            combinedMsg.match(/['"]([a-zA-Z0-9_]+)['"]\s+column/i) ||
+            combinedMsg.match(/column\s+['"]([a-zA-Z0-9_]+)['"]/i);
+
+          if (colMatch) {
+            const offendingCol = colMatch[1] || colMatch[2];
+            if (offendingCol && offendingCol in currentPayload && offendingCol !== 'id') {
+              unsupportedAppointmentCols.add(offendingCol);
+              delete currentPayload[offendingCol];
+              removedAny = true;
+            }
+          }
+
+          if (
+            'cancellation_reason' in currentPayload ||
+            'cancelled_by' in currentPayload ||
+            'cancelled_at' in currentPayload
+          ) {
+            unsupportedAppointmentCols.add('cancellation_reason');
+            unsupportedAppointmentCols.add('cancelled_by');
+            unsupportedAppointmentCols.add('cancelled_at');
+            delete currentPayload.cancellation_reason;
+            delete currentPayload.cancelled_by;
+            delete currentPayload.cancelled_at;
             removedAny = true;
+          } else if (!removedAny && 'patient_dni' in currentPayload) {
+            unsupportedAppointmentCols.add('patient_dni');
+            delete currentPayload.patient_dni;
+            removedAny = true;
+          }
+
+          if (removedAny) {
+            continue;
           }
         }
 
-        // Also strip cancellation columns if present
-        if (
-          'cancellation_reason' in currentPayload ||
-          'cancelled_by' in currentPayload ||
-          'cancelled_at' in currentPayload
-        ) {
-          delete currentPayload.cancellation_reason;
-          delete currentPayload.cancelled_by;
-          delete currentPayload.cancelled_at;
-          removedAny = true;
-        } else if (!removedAny && 'patient_dni' in currentPayload) {
-          delete currentPayload.patient_dni;
-          removedAny = true;
+        // 2. Handle Foreign Key constraint violations (PostgreSQL 23503)
+        const isFkError = errCode === '23503' || /foreign key/i.test(combinedMsg);
+        if (isFkError) {
+          if (currentPayload.doctor_id !== null) {
+            currentPayload.doctor_id = null;
+            continue;
+          }
+          if (currentPayload.specialty_id !== null) {
+            currentPayload.specialty_id = null;
+            continue;
+          }
         }
 
-        if (removedAny) {
-          continue;
-        }
+        console.warn('Error syncing appointment to Supabase:', error);
+        return false;
       }
 
-      // 2. Handle Foreign Key constraint violations (PostgreSQL 23503)
-      const isFkError = errCode === '23503' || /foreign key/i.test(combinedMsg);
-      if (isFkError) {
-        if (currentPayload.doctor_id !== null) {
-          currentPayload.doctor_id = null;
-          continue;
-        }
-        if (currentPayload.specialty_id !== null) {
-          currentPayload.specialty_id = null;
-          continue;
-        }
-      }
-
-      console.warn('Error syncing appointment to Supabase:', error);
+      return false;
+    } catch (err) {
+      console.warn('Error syncing appointment to Supabase:', err);
       return false;
     }
+  })();
 
-    return false;
-  } catch (err) {
-    console.warn('Error syncing appointment to Supabase:', err);
-    return false;
+  inFlightAppointmentSaves.set(appointment.id, saveTask);
+  try {
+    return await saveTask;
+  } finally {
+    if (inFlightAppointmentSaves.get(appointment.id) === saveTask) {
+      inFlightAppointmentSaves.delete(appointment.id);
+    }
   }
 }
 
@@ -873,9 +917,19 @@ export async function syncDeleteAppointmentFromSupabase(id: string): Promise<boo
   const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
-    const { error } = await client.from('appointments').delete().eq('id', id);
-    // Also clean up any legacy rows marked [ELIMINADA]
-    await client.from('appointments').delete().ilike('notes', '%[ELIMINADA]%');
+    const pendingSave = inFlightAppointmentSaves.get(id);
+
+    // Execute physical DELETE immediately
+    const [{ error }] = await Promise.all([
+      client.from('appointments').delete().eq('id', id),
+      client.from('appointments').delete().ilike('notes', '%[ELIMINADA]%'),
+    ]);
+
+    // If an upsert for this appointment was in flight when delete was clicked, wait for it and delete again immediately
+    if (pendingSave) {
+      await pendingSave.catch(() => {});
+      await client.from('appointments').delete().eq('id', id);
+    }
 
     const { data: verifyRemaining } = await client
       .from('appointments')
@@ -883,8 +937,17 @@ export async function syncDeleteAppointmentFromSupabase(id: string): Promise<boo
       .eq('id', id);
 
     if (verifyRemaining && verifyRemaining.length > 0) {
-      lastKnownRlsDeleteBlocked = true;
-      return false;
+      // Retry once immediately in case of concurrent write
+      await client.from('appointments').delete().eq('id', id);
+      const { data: verifyAfterRetry } = await client
+        .from('appointments')
+        .select('id')
+        .eq('id', id);
+
+      if (verifyAfterRetry && verifyAfterRetry.length > 0) {
+        lastKnownRlsDeleteBlocked = true;
+        return false;
+      }
     }
 
     lastKnownRlsDeleteBlocked = false;
@@ -902,8 +965,19 @@ export async function syncDeleteAppointmentsBatchFromSupabase(ids: string[]): Pr
   const client = await ensureActiveSupabaseClient();
   if (!client) return false;
   try {
-    const { error } = await client.from('appointments').delete().in('id', ids);
-    await client.from('appointments').delete().ilike('notes', '%[ELIMINADA]%');
+    const pendingSaves = ids
+      .map(id => inFlightAppointmentSaves.get(id))
+      .filter((p): p is Promise<boolean> => Boolean(p));
+
+    const [{ error }] = await Promise.all([
+      client.from('appointments').delete().in('id', ids),
+      client.from('appointments').delete().ilike('notes', '%[ELIMINADA]%'),
+    ]);
+
+    if (pendingSaves.length > 0) {
+      await Promise.allSettled(pendingSaves);
+      await client.from('appointments').delete().in('id', ids);
+    }
 
     const { data: verifyRemaining } = await client
       .from('appointments')
@@ -911,8 +985,16 @@ export async function syncDeleteAppointmentsBatchFromSupabase(ids: string[]): Pr
       .in('id', ids);
 
     if (verifyRemaining && verifyRemaining.length > 0) {
-      lastKnownRlsDeleteBlocked = true;
-      return false;
+      await client.from('appointments').delete().in('id', ids);
+      const { data: verifyAfterRetry } = await client
+        .from('appointments')
+        .select('id')
+        .in('id', ids);
+
+      if (verifyAfterRetry && verifyAfterRetry.length > 0) {
+        lastKnownRlsDeleteBlocked = true;
+        return false;
+      }
     }
 
     lastKnownRlsDeleteBlocked = false;

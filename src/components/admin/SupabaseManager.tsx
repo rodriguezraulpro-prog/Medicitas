@@ -26,6 +26,8 @@ import {
   Unlock,
   Code2,
   CloudOff,
+  Download,
+  Upload,
 } from 'lucide-react';
 import { SUPABASE_SQL_SCHEMA } from '../../data/supabaseSqlScript';
 
@@ -45,6 +47,8 @@ export const SupabaseManager: React.FC<SupabaseManagerProps> = ({
     setCloudConfig,
     syncFromCloud,
     syncToCloud,
+    exportBackupData,
+    importBackupData,
     doctors,
     specialties,
     appointments,
@@ -129,6 +133,24 @@ export const SupabaseManager: React.FC<SupabaseManagerProps> = ({
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const handleImportBackupJson = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setTestResult(null);
+    try {
+      const text = await file.text();
+      const res = await importBackupData(text, true);
+      setTestResult(res);
+    } catch {
+      setTestResult({
+        success: false,
+        message: 'No se pudo leer el archivo de respaldo (.json).',
+      });
+    } finally {
+      e.target.value = '';
+    }
   };
 
   // Warning gate: Show access restriction if developer permission has not been confirmed
@@ -511,6 +533,47 @@ export const SupabaseManager: React.FC<SupabaseManagerProps> = ({
                   </span>
                 </div>
               </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  exportBackupData();
+                  setTestResult({
+                    success: true,
+                    message: '¡Respaldo completo (.json) descargado en tu dispositivo!',
+                  });
+                }}
+                className="p-3 rounded-2xl border border-slate-200 hover:border-indigo-300 bg-slate-50 hover:bg-indigo-50/50 text-left transition flex items-start gap-3 cursor-pointer"
+              >
+                <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
+                  <Download className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="text-xs font-bold text-slate-900 block">Guardar respaldo local (.json)</span>
+                  <span className="text-[11px] text-slate-500">
+                    Descarga un archivo en tu PC/celular con toda la base de datos actual.
+                  </span>
+                </div>
+              </button>
+
+              <label className="p-3 rounded-2xl border border-slate-200 hover:border-emerald-300 bg-slate-50 hover:bg-emerald-50/50 text-left transition flex items-start gap-3 cursor-pointer">
+                <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                  <Upload className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="text-xs font-bold text-slate-900 block">Restaurar y migrar archivo (.json)</span>
+                  <span className="text-[11px] text-slate-500">
+                    Carga tu archivo .json y súbelo automáticamente al Supabase conectado.
+                  </span>
+                </div>
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={handleImportBackupJson}
+                  disabled={isCloudSyncing}
+                  className="hidden"
+                />
+              </label>
             </div>
           </div>
         </div>

@@ -21,11 +21,18 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  Download,
+  Upload,
+  Cloud,
+  CloudOff,
+  RefreshCw,
 } from 'lucide-react';
 import { formatTimePretty, calculateEndTime } from '../../utils/whatsapp';
 import { encodePinForStorage } from '../../utils/pinSecurity';
 
-export const ClinicSettings: React.FC = () => {
+export const ClinicSettings: React.FC<{ onOpenSupportSection?: () => void }> = ({
+  onOpenSupportSection,
+}) => {
   const {
     clinicConfig,
     updateClinicConfig,
@@ -34,8 +41,14 @@ export const ClinicSettings: React.FC = () => {
     doctors,
     specialties,
     appointments,
+    blockedSlots,
     updateDoctor,
     isCloudConnected,
+    isCloudSyncing,
+    disconnectOnlineDatabase,
+    connectOnlineDatabase,
+    exportBackupData,
+    importBackupData,
   } = useClinic();
 
   const [name, setName] = useState(clinicConfig.name);
@@ -62,6 +75,45 @@ export const ClinicSettings: React.FC = () => {
   >('past');
   const [isCleaningCancelled, setIsCleaningCancelled] = useState(false);
   const [cleanupSuccessMessage, setCleanupSuccessMessage] = useState<string | null>(null);
+  const [backupFeedback, setBackupFeedback] = useState<{ success: boolean; message: string } | null>(null);
+  const [isImportingBackup, setIsImportingBackup] = useState(false);
+  const [isTogglingOnlineDb, setIsTogglingOnlineDb] = useState(false);
+
+  const handleToggleOnlineDatabase = async () => {
+    setIsTogglingOnlineDb(true);
+    setBackupFeedback(null);
+    try {
+      if (isCloudConnected) {
+        const res = await disconnectOnlineDatabase();
+        setBackupFeedback(res);
+      } else {
+        const res = await connectOnlineDatabase();
+        setBackupFeedback(res);
+      }
+    } finally {
+      setIsTogglingOnlineDb(false);
+    }
+  };
+
+  const handleImportFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsImportingBackup(true);
+    setBackupFeedback(null);
+    try {
+      const text = await file.text();
+      const res = await importBackupData(text, true);
+      setBackupFeedback(res);
+    } catch {
+      setBackupFeedback({
+        success: false,
+        message: 'No se pudo leer el archivo seleccionado.',
+      });
+    } finally {
+      setIsImportingBackup(false);
+      e.target.value = '';
+    }
+  };
 
   const todayStr = new Date().toISOString().split('T')[0];
   const matchingCancelledIds = appointments
@@ -432,45 +484,6 @@ export const ClinicSettings: React.FC = () => {
           </div>
         </div>
 
-        {/* Cloud Database Quick Banner */}
-        <div className="bg-gradient-to-r from-teal-50 to-emerald-50 rounded-2xl p-4 border border-teal-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-xs">
-              <Database className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-extrabold text-sm text-teal-950">
-                  Base de Datos en la Nube
-                </span>
-                <span
-                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                    isCloudConnected
-                      ? 'bg-emerald-200 text-emerald-900'
-                      : 'bg-amber-100 text-amber-800'
-                  }`}
-                >
-                  {isCloudConnected ? '🟢 Conectado' : '🟡 Modo Local'}
-                </span>
-              </div>
-              <p className="text-xs text-teal-800/80 mt-0.5">
-                Configura URL, credenciales de la Nube y copia el script SQL para clonar bases de datos para nuevas clínicas.
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              const el = document.getElementById('header-nav-database');
-              if (el) el.click();
-            }}
-            className="px-3.5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-xs transition shrink-0 cursor-pointer text-center"
-          >
-            Abrir Panel de la Nube
-          </button>
-        </div>
-
         {/* Save button bar */}
         <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
           {savedSuccess && (
@@ -490,6 +503,137 @@ export const ClinicSettings: React.FC = () => {
           </button>
         </div>
       </form>
+
+      {/* Manual Local Backup (.json) & Online Database Connection */}
+      <div className="bg-blue-50/60 border border-blue-200 rounded-3xl p-5 sm:p-6 space-y-4">
+        <div className="flex items-start gap-3.5">
+          <div className="w-11 h-11 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0 shadow-2xs border border-blue-200">
+            <Database className="w-5 h-5" />
+          </div>
+          <div className="space-y-1 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h4 className="text-sm sm:text-base font-extrabold text-slate-900">
+                Respaldo Manual (.json) y Base de Datos Online
+              </h4>
+              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-blue-200 text-blue-950 uppercase tracking-wider">
+                Copia de Seguridad Total
+              </span>
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold inline-flex items-center gap-1 border ${
+                  isCloudConnected
+                    ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                    : 'bg-slate-100 text-slate-700 border-slate-300'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    isCloudConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
+                  }`}
+                />
+                {isCloudConnected ? 'Base de Datos Online Conectada' : 'Modo Local (Offline)'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Guarda una copia completa de tu base de datos en tu computadora o teléfono (archivo <strong>.json</strong> con configuración, {specialties.length} especialidades, {doctors.length} médicos, {appointments.length} citas y {blockedSlots.length} bloqueos). También puedes desconectar o conectar la base de datos online; cuando conectes desde el modo offline, toda la información local se subirá automáticamente al servidor en línea.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-3 border-t border-blue-200/80">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => {
+                exportBackupData();
+                setBackupFeedback({
+                  success: true,
+                  message: '¡Archivo de respaldo (.json) descargado en tu dispositivo!',
+                });
+              }}
+              className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Download className="w-4 h-4" />
+              <span>1. Descargar Respaldo Local (.json)</span>
+            </button>
+
+            <label className="px-4 py-2.5 rounded-xl bg-white hover:bg-blue-50 text-blue-800 border border-blue-300 text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-2 cursor-pointer">
+              <Upload className="w-4 h-4 text-blue-600" />
+              <span>
+                {isImportingBackup
+                  ? 'Restaurando y sincronizando...'
+                  : '2. Restaurar / Migrar desde Archivo (.json)'}
+              </span>
+              <input
+                type="file"
+                accept=".json,application/json"
+                onChange={handleImportFileChange}
+                disabled={isImportingBackup}
+                className="hidden"
+              />
+            </label>
+
+            <button
+              type="button"
+              onClick={handleToggleOnlineDatabase}
+              disabled={isTogglingOnlineDb || isCloudSyncing}
+              className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 ${
+                isCloudConnected
+                  ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+              }`}
+            >
+              {isTogglingOnlineDb || isCloudSyncing ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>
+                    {isCloudConnected
+                      ? 'Desconectando...'
+                      : 'Conectando y subiendo datos locales...'}
+                  </span>
+                </>
+              ) : isCloudConnected ? (
+                <>
+                  <CloudOff className="w-4 h-4" />
+                  <span>Desconectar Base de Datos Online</span>
+                </>
+              ) : (
+                <>
+                  <Cloud className="w-4 h-4" />
+                  <span>Conectar Base de Datos Online</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {backupFeedback && (
+          <div
+            className={`p-3 rounded-xl border text-xs font-bold flex items-center gap-2 animate-in fade-in ${
+              backupFeedback.success
+                ? 'bg-emerald-100 border-emerald-200 text-emerald-900'
+                : 'bg-rose-100 border-rose-200 text-rose-900'
+            }`}
+          >
+            {backupFeedback.success ? (
+              <Check className="w-4 h-4 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+            )}
+            <span>{backupFeedback.message}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Discrete Technical Support Link */}
+      <div className="flex justify-end px-2 -mt-2">
+        <button
+          type="button"
+          onClick={onOpenSupportSection}
+          className="text-[11px] text-slate-400 hover:text-slate-600 transition-colors cursor-pointer underline-offset-2 hover:underline"
+        >
+          Área de soporte técnico ({isCloudConnected ? 'Online' : 'Local'})
+        </button>
+      </div>
 
       {/* Selective Maintenance: Limpiar Citas Atendidas y Canceladas Antiguas */}
       <div className="bg-amber-50/70 border border-amber-200 rounded-3xl p-5 sm:p-6 space-y-4">

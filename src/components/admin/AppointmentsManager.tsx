@@ -206,9 +206,19 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
       setPurgeFeedback(
         `Se eliminaron ${deletedCount} ${targetLabel} de la base de datos.`
       );
-      setTimeout(() => setPurgeFeedback(null), 5000);
+      setTimeout(() => setPurgeFeedback(null), 6000);
     } finally {
       setIsPurging(false);
+    }
+  };
+
+  const handleSingleDeleteAppointment = async (id: string) => {
+    const ok = await deleteAppointment(id);
+    if (ok) {
+      setPurgeFeedback(
+        `Registro #${id} eliminado instantáneamente de Supabase. (En el Table Editor de Supabase, pulsa el botón ↻ junto a Insert para ver la tabla actualizada al instante).`
+      );
+      setTimeout(() => setPurgeFeedback(null), 6000);
     }
   };
 
@@ -1272,7 +1282,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
 
                     <button
                       id={`btn-delete-cancelled-${appointment.id}`}
-                      onClick={() => deleteAppointment(appointment.id)}
+                      onClick={() => handleSingleDeleteAppointment(appointment.id)}
                       className="px-3 py-1.5 rounded-xl bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-700 border border-slate-200 hover:border-rose-200 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
                       title="Eliminar definitivamente este registro cancelado de la base de datos"
                     >
@@ -1339,7 +1349,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
                     ) : (
                       <button
                         id={`btn-delete-attended-${appointment.id}`}
-                        onClick={() => deleteAppointment(appointment.id)}
+                        onClick={() => handleSingleDeleteAppointment(appointment.id)}
                         className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-700 border border-slate-200 hover:border-rose-200 text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                         title="Eliminar este registro ya atendido de la base de datos"
                       >

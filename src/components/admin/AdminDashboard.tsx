@@ -123,7 +123,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         {activeSection === 'reports' && <ReportsAnalytics />}
 
-        {activeSection === 'settings' && <ClinicSettings />}
+        {activeSection === 'settings' && (
+          <ClinicSettings onOpenSupportSection={() => setActiveSection('database')} />
+        )}
 
         {activeSection === 'database' && (
           <SupabaseManager

@@ -248,24 +248,23 @@ export const AdminApp: React.FC = () => {
                   <span>Configuración</span>
                 </button>
 
-                <button
+                <div
                   id="header-nav-database"
-                  onClick={() => setActiveSection('database')}
-                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap cursor-pointer shrink-0 ${
-                    activeSection === 'database'
-                      ? 'bg-emerald-600 text-white shadow-sm ring-2 ring-emerald-500/20'
-                      : 'text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 border border-slate-200'
+                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap shrink-0 select-none ${
+                    isCloudConnected
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : 'bg-slate-100 text-slate-600 border border-slate-200'
                   }`}
+                  title={isCloudConnected ? 'Base de datos conectada y en línea' : 'Modo local sin conexión a la nube'}
                 >
-                  <Database className="w-3.5 h-3.5" />
-                  <span>Base de Datos (Nube)</span>
+                  <Database className={`w-3.5 h-3.5 ${isCloudConnected ? 'text-emerald-600' : 'text-slate-500'}`} />
+                  <span>{isCloudConnected ? 'Base de datos conectada • Online' : 'Base de datos • Modo Local'}</span>
                   <span
                     className={`w-2 h-2 rounded-full ${
-                      isCloudConnected ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'
+                      isCloudConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
                     }`}
-                    title={isCloudConnected ? 'Conectado a la Nube' : 'Modo local offline'}
                   />
-                </button>
+                </div>
               </div>
             )}
 

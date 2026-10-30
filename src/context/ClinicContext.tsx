@@ -38,7 +38,7 @@ interface ClinicContextType {
   updateAppointmentStatus: (id: string, status: AppointmentStatus) => void;
   updateAppointment: (id: string, updates: Partial<Appointment>) => void;
   cancelAppointment: (id: string, reason: string, cancelledBy: 'paciente' | 'clinica') => void;
-  deleteAppointment: (id: string) => void;
+  deleteAppointment: (id: string) => Promise<boolean>;
   purgeCancelledAppointments: (appointmentIds: string[]) => Promise<number>;
   addDoctor: (doctor: Omit<Doctor, 'id'>) => Doctor;
   updateDoctor: (id: string, updates: Partial<Doctor>) => void;
@@ -61,8 +61,12 @@ interface ClinicContextType {
   rlsDeleteBlocked: boolean;
   supabaseConfig: SupabaseConfig;
   setCloudConfig: (config: SupabaseConfig) => Promise<{ success: boolean; message: string }>;
+  disconnectOnlineDatabase: () => Promise<{ success: boolean; message: string }>;
+  connectOnlineDatabase: () => Promise<{ success: boolean; message: string; needsCredentials?: boolean }>;
   syncFromCloud: (silent?: boolean) => Promise<{ success: boolean; message: string }>;
   syncToCloud: () => Promise<{ success: boolean; message: string }>;
+  exportBackupData: () => void;
+  importBackupData: (jsonText: string, pushToCloudIfConnected?: boolean) => Promise<{ success: boolean; message: string }>;
 }
 
 const STORAGE_KEYS = {
@@ -72,6 +76,8 @@ const STORAGE_KEYS = {
   CONFIG: 'medicitas_config_v3',
   BLOCKED: 'medicitas_blocked_v3',
   DELETED_APPOINTMENTS: 'medicitas_deleted_appointments_v3',
+  MANUAL_OFFLINE: 'medicitas_manual_offline_v3',
+  SAVED_CLOUD_CREDENTIALS: 'medicitas_saved_cloud_credentials_v3',
 };
 
 // Purge old v1/v2 demo & cached keys if present to ensure a completely clean template start
@@ -153,6 +159,13 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [cloudError, setCloudError] = useState<string | null>(null);
   const [lastCloudSync, setLastCloudSync] = useState<Date | null>(null);
   const [rlsDeleteBlocked, setRlsDeleteBlocked] = useState<boolean>(false);
+  const [isManualOffline, setIsManualOffline] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEYS.MANUAL_OFFLINE) === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   // Sync state to local storage as continuous fallback
   useEffect(() => {
@@ -360,7 +373,16 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Set & Validate Cloud credentials
   const setCloudConfig = async (newConfig: SupabaseConfig): Promise<{ success: boolean; message: string }> => {
+    const wasOffline = !isCloudConnected || isManualOffline;
+
     if (!newConfig.url || !newConfig.anonKey) {
+      if (supabaseConfig.url && supabaseConfig.anonKey) {
+        try {
+          localStorage.setItem(STORAGE_KEYS.SAVED_CLOUD_CREDENTIALS, JSON.stringify(supabaseConfig));
+        } catch {
+          // ignore
+        }
+      }
       await saveServerSupabaseConfig({ url: '', anonKey: '' });
       setSupabaseConfigState({ url: '', anonKey: '' });
       setSupabaseClientConfig(null);
@@ -378,6 +400,14 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return test;
     }
 
+    try {
+      localStorage.removeItem(STORAGE_KEYS.MANUAL_OFFLINE);
+      localStorage.setItem(STORAGE_KEYS.SAVED_CLOUD_CREDENTIALS, JSON.stringify(cleanConfig));
+    } catch {
+      // ignore
+    }
+    setIsManualOffline(false);
+
     // Save both locally and to server/worker so all devices (phones, tablets, PCs) get it
     await saveServerSupabaseConfig(cleanConfig);
     setSupabaseConfigState(cleanConfig);
@@ -385,7 +415,26 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setIsCloudConnected(true);
     setCloudError(null);
 
-    // Load cloud data if available; NEVER overwrite remote data from a fresh/blank device
+    const hasLocalCustomData =
+      doctors.length > 0 ||
+      specialties.length > 0 ||
+      appointments.length > 0 ||
+      clinicConfig.name !== initialClinicConfig.name ||
+      clinicConfig.whatsappNumber !== '' ||
+      clinicConfig.phone !== '';
+
+    // If connecting while in offline mode and there is local data, automatically upload local data to the online database
+    if (wasOffline && hasLocalCustomData) {
+      await uploadAllLocalDataToSupabase({
+        clinicConfig,
+        specialties,
+        doctors,
+        appointments,
+        blockedSlots,
+      });
+    }
+
+    // Load/sync cloud data so everything is unified
     const cloudData = await fetchClinicDataFromSupabase();
     const hasRemoteData = Boolean(
       cloudData &&
@@ -398,14 +447,6 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
               cloudData.clinicConfig.phone !== '' ||
               cloudData.clinicConfig.address !== '')))
     );
-
-    const hasLocalCustomData =
-      doctors.length > 0 ||
-      specialties.length > 0 ||
-      appointments.length > 0 ||
-      clinicConfig.name !== initialClinicConfig.name ||
-      clinicConfig.whatsappNumber !== '' ||
-      clinicConfig.phone !== '';
 
     if (cloudData && (hasRemoteData || !hasLocalCustomData)) {
       if (cloudData.clinicConfig) setClinicConfig(cloudData.clinicConfig);
@@ -429,7 +470,6 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       });
       setBlockedSlots(cloudData.blockedSlots);
     } else if (hasLocalCustomData) {
-      // Cloud is completely brand new and this device has local data to seed
       await uploadAllLocalDataToSupabase({
         clinicConfig,
         specialties,
@@ -443,8 +483,139 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setIsCloudSyncing(false);
     return {
       success: true,
-      message: '¡Conexión establecida y sincronizada! Todos los dispositivos conectados a esta base de datos reflejarán los datos en tiempo real.',
+      message:
+        wasOffline && hasLocalCustomData
+          ? '¡Base de datos online conectada! Tus datos locales se subieron y sincronizaron automáticamente.'
+          : '¡Conexión establecida y sincronizada! Todos los dispositivos conectados a esta base de datos reflejarán los datos en tiempo real.',
     };
+  };
+
+  // Disconnect Online Database to work in Offline / Local Mode while preserving credentials for 1-click reconnect
+  const disconnectOnlineDatabase = async (): Promise<{ success: boolean; message: string }> => {
+    try {
+      if (supabaseConfig.url && supabaseConfig.anonKey) {
+        localStorage.setItem(STORAGE_KEYS.SAVED_CLOUD_CREDENTIALS, JSON.stringify(supabaseConfig));
+      }
+      localStorage.setItem(STORAGE_KEYS.MANUAL_OFFLINE, 'true');
+    } catch {
+      // ignore
+    }
+    setIsManualOffline(true);
+    setSupabaseClientConfig(null);
+    setIsCloudConnected(false);
+    setCloudError(null);
+    return {
+      success: true,
+      message:
+        'Base de datos online desconectada. Ahora estás trabajando en Modo Local (Offline); cuando vuelvas a conectar, tus cambios locales se subirán automáticamente.',
+    };
+  };
+
+  // Reconnect Online Database from Offline Mode and automatically upload all local data
+  const connectOnlineDatabase = async (): Promise<{
+    success: boolean;
+    message: string;
+    needsCredentials?: boolean;
+  }> => {
+    setIsCloudSyncing(true);
+    setCloudError(null);
+
+    try {
+      let targetCfg: SupabaseConfig | null = null;
+
+      if (supabaseConfig.url && supabaseConfig.anonKey) {
+        targetCfg = supabaseConfig;
+      } else {
+        try {
+          const savedRaw = localStorage.getItem(STORAGE_KEYS.SAVED_CLOUD_CREDENTIALS);
+          if (savedRaw) {
+            const parsed = JSON.parse(savedRaw);
+            if (parsed?.url && parsed?.anonKey) {
+              targetCfg = { url: parsed.url.trim(), anonKey: parsed.anonKey.trim() };
+            }
+          }
+        } catch {
+          // ignore
+        }
+
+        if (!targetCfg) {
+          const stored = getStoredSupabaseConfig();
+          if (stored.url && stored.anonKey) {
+            targetCfg = stored;
+          }
+        }
+
+        if (!targetCfg) {
+          const serverCfg = await fetchServerSupabaseConfig();
+          if (serverCfg && serverCfg.url && serverCfg.anonKey) {
+            targetCfg = serverCfg;
+          }
+        }
+      }
+
+      if (!targetCfg || !targetCfg.url || !targetCfg.anonKey) {
+        setIsCloudSyncing(false);
+        return {
+          success: false,
+          needsCredentials: true,
+          message:
+            'No se encontraron credenciales de base de datos online guardadas. Configúralas desde el Área de soporte técnico.',
+        };
+      }
+
+      const cleanConfig = { url: targetCfg.url.trim(), anonKey: targetCfg.anonKey.trim() };
+      const test = await testSupabaseConnection(cleanConfig);
+      if (!test.success) {
+        setIsCloudSyncing(false);
+        setCloudError(test.message);
+        return { success: false, message: test.message };
+      }
+
+      try {
+        localStorage.removeItem(STORAGE_KEYS.MANUAL_OFFLINE);
+        localStorage.setItem(STORAGE_KEYS.SAVED_CLOUD_CREDENTIALS, JSON.stringify(cleanConfig));
+      } catch {
+        // ignore
+      }
+      setIsManualOffline(false);
+
+      saveStoredSupabaseConfig(cleanConfig);
+      await saveServerSupabaseConfig(cleanConfig);
+      setSupabaseConfigState(cleanConfig);
+      setSupabaseClientConfig(cleanConfig);
+
+      // Automatically upload all current local data to the online database since we were in offline mode
+      const uploadRes = await uploadAllLocalDataToSupabase({
+        clinicConfig,
+        specialties,
+        doctors,
+        appointments,
+        blockedSlots,
+      });
+
+      await syncFromCloud(true);
+      setIsCloudConnected(true);
+      setLastCloudSync(new Date());
+      setIsCloudSyncing(false);
+
+      if (!uploadRes.success) {
+        return {
+          success: true,
+          message: `Base de datos online conectada, pero hubo un aviso al subir algunos registros locales: ${uploadRes.message}`,
+        };
+      }
+
+      return {
+        success: true,
+        message: `¡Base de datos online conectada! Se subieron automáticamente todos los datos locales al servidor (${specialties.length} especialidades, ${doctors.length} médicos, ${appointments.length} citas).`,
+      };
+    } catch (err: any) {
+      setIsCloudSyncing(false);
+      return {
+        success: false,
+        message: err?.message || 'Error al intentar conectar con la base de datos online.',
+      };
+    }
   };
 
   // Initial cloud check on mount
@@ -474,7 +645,27 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       if (effectiveCfg && effectiveCfg.url && effectiveCfg.anonKey) {
         saveStoredSupabaseConfig(effectiveCfg);
+        try {
+          localStorage.setItem(STORAGE_KEYS.SAVED_CLOUD_CREDENTIALS, JSON.stringify(effectiveCfg));
+        } catch {
+          // ignore
+        }
         setSupabaseConfigState(effectiveCfg);
+
+        const manuallyOffline = (() => {
+          try {
+            return localStorage.getItem(STORAGE_KEYS.MANUAL_OFFLINE) === 'true';
+          } catch {
+            return false;
+          }
+        })();
+
+        if (manuallyOffline) {
+          setSupabaseClientConfig(null);
+          setIsCloudConnected(false);
+          return;
+        }
+
         setSupabaseClientConfig(effectiveCfg);
         await syncFromCloud();
       }
@@ -489,7 +680,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Realtime subscription across ALL tables + Auto-sync on window focus & periodic interval
   useEffect(() => {
-    if (!supabaseConfig.url || !supabaseConfig.anonKey) return;
+    if (isManualOffline || !isCloudConnected || !supabaseConfig.url || !supabaseConfig.anonKey) return;
 
     const client = getSupabaseClient();
     if (!client) return;
@@ -499,7 +690,20 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       .on(
         'postgres_changes',
         { event: '*', schema: 'public' },
-        () => {
+        (payload: any) => {
+          const table = payload?.table;
+          const eventType = payload?.eventType;
+          const row = payload?.new;
+          if (
+            table === 'appointments' &&
+            (eventType === 'INSERT' || eventType === 'UPDATE') &&
+            row?.id &&
+            (deletedAppointmentIdsRef.current.has(String(row.id)) ||
+              (typeof row.notes === 'string' && row.notes.includes('[ELIMINADA]')))
+          ) {
+            syncDeleteAppointmentFromSupabase(String(row.id)).catch(() => {});
+            return;
+          }
           syncFromCloud(true);
         }
       )
@@ -515,9 +719,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     document.addEventListener('visibilitychange', handleVisibilityOrFocus);
 
     const intervalId = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        syncFromCloud(true);
-      }
+      syncFromCloud(true);
     }, 10000);
 
     return () => {
@@ -526,7 +728,7 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       window.clearInterval(intervalId);
       client.removeChannel(realtimeChannel);
     };
-  }, [supabaseConfig.url, supabaseConfig.anonKey, syncFromCloud]);
+  }, [isManualOffline, isCloudConnected, supabaseConfig.url, supabaseConfig.anonKey, syncFromCloud]);
 
   // --------------------------------------------------------------------------
   // Core Domain Operations (Auto-sync to Supabase in background when configured)
@@ -567,51 +769,69 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   const updateAppointmentStatus = (id: string, status: AppointmentStatus) => {
-    setAppointments(prev => {
-      const current = prev.find(app => app.id === id);
-      // Cancellation is strictly irreversible
-      if (current && current.status === 'cancelada' && status !== 'cancelada') {
-        console.warn(`[ClinicContext] La cita #${id} está cancelada de forma irreversible y no se puede reactivar.`);
-        return prev;
-      }
+    const current = appointments.find(app => app.id === id);
+    if (!current) return;
+    if (current.status === 'cancelada' && status !== 'cancelada') {
+      console.warn(`[ClinicContext] La cita #${id} está cancelada de forma irreversible y no se puede reactivar.`);
+      return;
+    }
 
-      const next = prev.map(app => (app.id === id ? { ...app, status } : app));
-      const target = next.find(app => app.id === id);
-      if (target && !deletedAppointmentIdsRef.current.has(id)) {
-        syncSaveAppointmentToSupabase(target).catch(err =>
-          console.warn('Background sync error (updateAppointmentStatus):', err)
-        );
-      }
-      return next;
-    });
+    const updatedTarget: Appointment = { ...current, status };
+
+    setAppointments(prev =>
+      prev.map(app => (app.id === id ? { ...app, status } : app))
+    );
+
+    if (!deletedAppointmentIdsRef.current.has(id)) {
+      syncSaveAppointmentToSupabase(updatedTarget).catch(err =>
+        console.warn('Background sync error (updateAppointmentStatus):', err)
+      );
+    }
   };
 
   const updateAppointment = (id: string, updates: Partial<Appointment>) => {
-    setAppointments(prev => {
-      const current = prev.find(app => app.id === id);
-      // Cancellation is strictly irreversible
-      if (current && current.status === 'cancelada' && updates.status && updates.status !== 'cancelada') {
-        console.warn(`[ClinicContext] La cita #${id} está cancelada y no se puede reactivar.`);
-        return prev;
-      }
+    const current = appointments.find(app => app.id === id);
+    if (!current) return;
+    if (current.status === 'cancelada' && updates.status && updates.status !== 'cancelada') {
+      console.warn(`[ClinicContext] La cita #${id} está cancelada y no se puede reactivar.`);
+      return;
+    }
 
-      const next = prev.map(app => (app.id === id ? { ...app, ...updates } : app));
-      const target = next.find(app => app.id === id);
-      if (target && !deletedAppointmentIdsRef.current.has(id)) {
-        syncSaveAppointmentToSupabase(target).catch(err =>
-          console.warn('Background sync error (updateAppointment):', err)
-        );
-      }
-      return next;
-    });
+    const updatedTarget: Appointment = { ...current, ...updates };
+
+    setAppointments(prev =>
+      prev.map(app => (app.id === id ? { ...app, ...updates } : app))
+    );
+
+    if (!deletedAppointmentIdsRef.current.has(id)) {
+      syncSaveAppointmentToSupabase(updatedTarget).catch(err =>
+        console.warn('Background sync error (updateAppointment):', err)
+      );
+    }
   };
 
   const cancelAppointment = (id: string, reason: string, cancelledBy: 'paciente' | 'clinica') => {
     const cleanReason = reason.trim() || (cancelledBy === 'paciente' ? 'Cancelada por el paciente' : 'Cancelada por la clínica');
     const cancelledAt = new Date().toISOString();
+    const current = appointments.find(app => app.id === id);
 
-    setAppointments(prev => {
-      const next = prev.map(app => {
+    let updatedTarget: Appointment | null = null;
+    if (current) {
+      const updatedNotes = current.notes
+        ? `${current.notes} | [Cancelada por ${cancelledBy}: ${cleanReason}]`
+        : `[Cancelada por ${cancelledBy}: ${cleanReason}]`;
+      updatedTarget = {
+        ...current,
+        status: 'cancelada' as AppointmentStatus,
+        cancellationReason: cleanReason,
+        cancelledBy,
+        cancelledAt,
+        notes: updatedNotes,
+      };
+    }
+
+    setAppointments(prev =>
+      prev.map(app => {
         if (app.id !== id) return app;
         const updatedNotes = app.notes
           ? `${app.notes} | [Cancelada por ${cancelledBy}: ${cleanReason}]`
@@ -625,19 +845,17 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           cancelledAt,
           notes: updatedNotes,
         };
-      });
+      })
+    );
 
-      const target = next.find(app => app.id === id);
-      if (target && !deletedAppointmentIdsRef.current.has(id)) {
-        syncSaveAppointmentToSupabase(target).catch(err =>
-          console.warn('Background sync error (cancelAppointment):', err)
-        );
-      }
-      return next;
-    });
+    if (updatedTarget && !deletedAppointmentIdsRef.current.has(id)) {
+      syncSaveAppointmentToSupabase(updatedTarget).catch(err =>
+        console.warn('Background sync error (cancelAppointment):', err)
+      );
+    }
   };
 
-  const deleteAppointment = (id: string) => {
+  const deleteAppointment = async (id: string): Promise<boolean> => {
     persistDeletedAppointmentIds([id]);
     setAppointments(prev => {
       const next = prev.filter(app => app.id !== id);
@@ -648,11 +866,14 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
       return next;
     });
-    syncDeleteAppointmentFromSupabase(id)
-      .then(() => {
-        setRlsDeleteBlocked(isRlsDeleteBlocked());
-      })
-      .catch(err => console.warn('Background sync error (deleteAppointment):', err));
+    try {
+      const ok = await syncDeleteAppointmentFromSupabase(id);
+      setRlsDeleteBlocked(isRlsDeleteBlocked());
+      return ok;
+    } catch (err) {
+      console.warn('Background sync error (deleteAppointment):', err);
+      return false;
+    }
   };
 
   const purgeCancelledAppointments = async (appointmentIds: string[]): Promise<number> => {
@@ -803,6 +1024,134 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const resetToDemoData = clearAllData;
 
+  const exportBackupData = () => {
+    const payload = {
+      version: '3.0',
+      exportedAt: new Date().toISOString(),
+      clinicConfig,
+      specialties,
+      doctors,
+      appointments,
+      blockedSlots,
+    };
+
+    const jsonString = JSON.stringify(payload, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const dateStamp = new Date().toISOString().split('T')[0];
+    const safeClinicName = (clinicConfig.name || 'medicitas')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `respaldo_${safeClinicName || 'medicitas'}_${dateStamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const importBackupData = async (
+    jsonText: string,
+    pushToCloudIfConnected = true
+  ): Promise<{ success: boolean; message: string }> => {
+    try {
+      const parsed = JSON.parse(jsonText);
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        (!Array.isArray(parsed.doctors) &&
+          !Array.isArray(parsed.specialties) &&
+          !Array.isArray(parsed.appointments) &&
+          !parsed.clinicConfig)
+      ) {
+        return {
+          success: false,
+          message: 'El archivo seleccionado no tiene un formato de respaldo válido de MediCitas (.json).',
+        };
+      }
+
+      const nextConfig: ClinicConfig = parsed.clinicConfig
+        ? { ...initialClinicConfig, ...parsed.clinicConfig }
+        : clinicConfig;
+      const nextSpecialties: Specialty[] = Array.isArray(parsed.specialties)
+        ? parsed.specialties
+        : specialties;
+      const nextDoctors: Doctor[] = Array.isArray(parsed.doctors) ? parsed.doctors : doctors;
+      const nextAppointments: Appointment[] = Array.isArray(parsed.appointments)
+        ? parsed.appointments
+        : appointments;
+      const nextBlockedSlots: BlockedSlot[] = Array.isArray(parsed.blockedSlots)
+        ? parsed.blockedSlots
+        : blockedSlots;
+
+      // Clear any deleted appointment tombstones for IDs being explicitly restored from backup
+      nextAppointments.forEach(a => {
+        if (a?.id) deletedAppointmentIdsRef.current.delete(a.id);
+      });
+      try {
+        localStorage.setItem(
+          STORAGE_KEYS.DELETED_APPOINTMENTS,
+          JSON.stringify(Array.from(deletedAppointmentIdsRef.current))
+        );
+      } catch {
+        // ignore
+      }
+
+      setClinicConfig(nextConfig);
+      setSpecialties(nextSpecialties);
+      setDoctors(nextDoctors);
+      setAppointments(nextAppointments);
+      setBlockedSlots(nextBlockedSlots);
+
+      try {
+        localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(nextConfig));
+        localStorage.setItem(STORAGE_KEYS.SPECIALTIES, JSON.stringify(nextSpecialties));
+        localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(nextDoctors));
+        localStorage.setItem(STORAGE_KEYS.APPOINTMENTS, JSON.stringify(nextAppointments));
+        localStorage.setItem(STORAGE_KEYS.BLOCKED, JSON.stringify(nextBlockedSlots));
+      } catch {
+        // ignore
+      }
+
+      if (pushToCloudIfConnected && isSupabaseConfigured()) {
+        setIsCloudSyncing(true);
+        const cloudRes = await uploadAllLocalDataToSupabase({
+          clinicConfig: nextConfig,
+          specialties: nextSpecialties,
+          doctors: nextDoctors,
+          appointments: nextAppointments,
+          blockedSlots: nextBlockedSlots,
+        });
+        setIsCloudSyncing(false);
+        if (cloudRes.success) {
+          setIsCloudConnected(true);
+          setLastCloudSync(new Date());
+          return {
+            success: true,
+            message: `¡Respaldo restaurado y sincronizado con la base de datos online con éxito! (${nextSpecialties.length} especialidades, ${nextDoctors.length} médicos, ${nextAppointments.length} citas).`,
+          };
+        }
+        return {
+          success: true,
+          message: `Respaldo cargado localmente (${nextSpecialties.length} especialidades, ${nextDoctors.length} médicos, ${nextAppointments.length} citas), pero hubo un aviso al subir a la Nube: ${cloudRes.message}`,
+        };
+      }
+
+      return {
+        success: true,
+        message: `¡Respaldo restaurado localmente con éxito! (${nextSpecialties.length} especialidades, ${nextDoctors.length} médicos, ${nextAppointments.length} citas).`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: 'Error al leer el archivo JSON: asegúrate de seleccionar un archivo .json válido.',
+      };
+    }
+  };
+
   const isSlotTaken = (
     doctorId: string,
     dateStr: string,
@@ -909,8 +1258,12 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         rlsDeleteBlocked,
         supabaseConfig,
         setCloudConfig,
+        disconnectOnlineDatabase,
+        connectOnlineDatabase,
         syncFromCloud,
         syncToCloud,
+        exportBackupData,
+        importBackupData,
       }}
     >
       {children}
